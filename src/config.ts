@@ -6,12 +6,15 @@ export interface RuntimeLaunchConfig {
   args: string[]
   cwd?: string
   env?: NodeJS.ProcessEnv
+  requestTimeoutMs?: number
 }
 
 export type RuntimeConfigErrorCode =
   | 'RUNTIME_NOT_CONFIGURED'
   | 'INVALID_RUNTIME_ARGS'
   | 'INVALID_RUNTIME_ENV'
+  | 'INVALID_RUNTIME_TIMEOUT'
+  | 'INVALID_MAX_TOKENS'
   | 'RUNTIME_CONFIG_NOT_FOUND'
   | 'INVALID_PROVIDER_PROFILE'
 
@@ -106,6 +109,11 @@ export function loadRuntimeLaunchConfig(
   const cwd = resolveOptionalPath(environment.DSH_MCP_RUNTIME_CWD, baseDirectory)
   const cordisConfig = resolveOptionalPath(environment.DSH_MCP_CORDIS_CONFIG, baseDirectory)
   const overrides = parseEnvironmentOverrides(environment.DSH_MCP_RUNTIME_ENV_JSON)
+  const requestTimeoutMs = parsePositiveInteger(
+    environment.DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS,
+    'DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS',
+    'INVALID_RUNTIME_TIMEOUT',
+  )
 
   if (cordisConfig !== undefined && !existsSync(cordisConfig)) {
     throw new RuntimeConfigError(
@@ -129,7 +137,7 @@ export function loadRuntimeLaunchConfig(
     ? { ...environment, ...childOverrides }
     : undefined
 
-  return { command, args, cwd, env }
+  return { command, args, cwd, env, requestTimeoutMs }
 }
 
 export type Phase0ProviderProfile = 'deepseek-official' | 'opencode-go'
@@ -168,12 +176,16 @@ export interface Phase0Options {
   sandboxCordisConfig: string
 }
 
-function parsePositiveInteger(raw: string | undefined, variableName: string): number | undefined {
+function parsePositiveInteger(
+  raw: string | undefined,
+  variableName: string,
+  errorCode: RuntimeConfigErrorCode = 'INVALID_RUNTIME_ENV',
+): number | undefined {
   if (raw === undefined || raw.trim() === '') return undefined
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new RuntimeConfigError(
-      'INVALID_RUNTIME_ENV',
+      errorCode,
       `${variableName} must be a positive safe integer`,
     )
   }
@@ -229,7 +241,11 @@ export function loadPhase0Options(
       environment.DSH_MCP_CORDIS_CONFIG,
       baseDirectory,
     ) ?? resolve(baseDirectory, 'runtime', profile.cordisConfigFile),
-    maxTokens: parsePositiveInteger(environment.DSH_MCP_MAX_TOKENS, 'DSH_MCP_MAX_TOKENS'),
+    maxTokens: parsePositiveInteger(
+      environment.DSH_MCP_MAX_TOKENS,
+      'DSH_MCP_MAX_TOKENS',
+      'INVALID_MAX_TOKENS',
+    ),
     requireWindows: environment.DSH_MCP_REQUIRE_WINDOWS !== '0',
     runtimePackage: environment.DSH_MCP_RUNTIME_PACKAGE?.trim()
       || '@deepseek-ai/dsh-sdk-jsonrpc-demo',
@@ -237,16 +253,77 @@ export function loadPhase0Options(
   }
 }
 
-export function redactSecretLike(value: string): string {
-  let redacted = value.replace(
-    /(\b(?:api[_-]?key|token|secret|password|authorization)\b\s*["']?\s*[:=]\s*["']?)[^\s,;}\]"']+/gi,
+export function secretValuesFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+  credentialRef?: string,
+): string[] {
+  const explicitReferences = new Set([
+    credentialRef?.trim(),
+    'DEEPSEEK_API_KEY',
+    'OPENCODE_API_KEY',
+    'OPENCODE_GO_API_KEY',
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0))
+  const values = new Set<string>()
+  const add = (value: unknown): void => {
+    if (typeof value === 'string' && value.length > 0) values.add(value)
+  }
+
+  for (const [key, value] of Object.entries(environment)) {
+    if (explicitReferences.has(key) || /(key|token|secret|password|authorization)/i.test(key)) {
+      add(value)
+    }
+  }
+
+  const runtimeOverrides = environment.DSH_MCP_RUNTIME_ENV_JSON
+  if (runtimeOverrides !== undefined && runtimeOverrides.trim() !== '') {
+    try {
+      const parsed = JSON.parse(runtimeOverrides) as unknown
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        // Runtime overrides are an explicit child-process secret boundary.
+        // Their names are caller-defined, so redact every string value rather
+        // than trusting a key-name convention such as FOO vs API_KEY.
+        for (const value of Object.values(parsed)) add(value)
+      }
+    } catch {
+      // The launch config reports malformed overrides separately.
+    }
+  }
+
+  return [...values]
+}
+
+export function redactSecretLike(value: string, secretValues: readonly string[] = []): string {
+  let redacted = value
+  for (const secret of [...new Set(secretValues)]
+    .filter((candidate) => candidate.length > 0)
+    .sort((left, right) => right.length - left.length)) {
+    if (secret.length < 8 && /^[A-Za-z0-9]+$/.test(secret)) {
+      const escaped = secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      redacted = redacted.replace(
+        new RegExp(`(^|[^A-Za-z0-9])${escaped}(?=$|[^A-Za-z0-9])`, 'g'),
+        '$1[REDACTED]',
+      )
+    } else {
+      redacted = redacted.split(secret).join('[REDACTED]')
+    }
+  }
+
+  redacted = redacted.replace(
+    /((?<![A-Za-z0-9_-])(?:api[_-]?key|token|secret|password|authorization)\b\s*["']?\s*[:=]\s*["']?)(\[[^\]\r\n]*\]|[^\s,;}\]"']+)(["'])?/gi,
+    (match: string, prefix: string, candidate: string, closingQuote: string | undefined) => (
+      candidate.toUpperCase() === '[REDACTED]'
+        ? match
+        : `${prefix}[REDACTED]${closingQuote ?? ''}`
+    ),
+  )
+  redacted = redacted.replace(
+    /(^|[^A-Za-z0-9])((?:sk|sess|token)-[A-Za-z0-9]{20,})(?=$|[^A-Za-z0-9])/gi,
     '$1[REDACTED]',
   )
-  redacted = redacted.replace(/\b(?:sk|sess|token)-[A-Za-z0-9._-]+\b/gi, '[REDACTED]')
   redacted = redacted.replace(/(\bBearer\s+)[A-Za-z0-9._-]+/gi, '$1[REDACTED]')
   return redacted
 }
 
-export function redactArgs(args: readonly string[]): string[] {
-  return args.map(redactSecretLike)
+export function redactArgs(args: readonly string[], secretValues: readonly string[] = []): string[] {
+  return args.map((arg) => redactSecretLike(arg, secretValues))
 }

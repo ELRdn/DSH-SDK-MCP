@@ -2,9 +2,13 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  loadPhase0Options,
   loadRuntimeLaunchConfig,
+  redactSecretLike,
+  secretValuesFromEnvironment,
   RuntimeConfigError,
 } from '../dist/config.js'
+import { safeError } from '../dist/report.js'
 import { RuntimeBusyError, RuntimeRunGate } from '../dist/run-gate.js'
 
 test('runtime args must be a JSON array of strings', () => {
@@ -42,6 +46,58 @@ test('environment overrides merge without deleting PATH', () => {
   })
   assert.equal(config.env.PATH, 'original-path')
   assert.equal(config.env.DSH_PERMISSION_MODE, 'read-only')
+})
+
+test('runtime request timeout is parsed as a positive integer', () => {
+  const config = loadRuntimeLaunchConfig({
+    DSH_MCP_RUNTIME_COMMAND: 'node',
+    DSH_MCP_RUNTIME_ARGS: '[]',
+    DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS: '1234',
+  })
+  assert.equal(config.requestTimeoutMs, 1234)
+})
+
+test('runtime timeout and max token validation use distinct structured config codes', () => {
+  assert.throws(
+    () => loadRuntimeLaunchConfig({
+      DSH_MCP_RUNTIME_COMMAND: 'node',
+      DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS: 'not-a-number',
+    }),
+    (error) => error instanceof RuntimeConfigError && error.code === 'INVALID_RUNTIME_TIMEOUT',
+  )
+
+  assert.throws(
+    () => loadPhase0Options({ DSH_MCP_MAX_TOKENS: 'not-a-number' }, '/phase1-project'),
+    (error) => error instanceof RuntimeConfigError && error.code === 'INVALID_MAX_TOKENS',
+  )
+})
+
+test('redaction preserves ordinary identifiers and exact configured secrets', () => {
+  assert.equal(redactSecretLike('C:\\repo\\sk-folder\\cfg'), 'C:\\repo\\sk-folder\\cfg')
+  assert.equal(redactSecretLike('token-version-1'), 'token-version-1')
+  assert.equal(redactSecretLike('rate limit: token=[REDACTED]'), 'rate limit: token=[REDACTED]')
+  assert.equal(redactSecretLike('build-token=version-1'), 'build-token=version-1')
+  assert.equal(redactSecretLike('build sk-folder-name-1234567890123456'), 'build sk-folder-name-1234567890123456')
+  assert.equal(redactSecretLike('credential sk-abcdefghijklmnopqrstuvwxyz1234'), 'credential [REDACTED]')
+  assert.equal(redactSecretLike('order 1234', ['1234']), 'order [REDACTED]')
+  assert.equal(redactSecretLike('order1234', ['1234']), 'order1234')
+  assert.equal(
+    redactSecretLike('credential=NONSTANDARD_REVIEW_SECRET', ['NONSTANDARD_REVIEW_SECRET']),
+    'credential=[REDACTED]',
+  )
+})
+
+test('all runtime override values are included in the redaction set', () => {
+  const values = secretValuesFromEnvironment({
+    DSH_MCP_RUNTIME_ENV_JSON: JSON.stringify({ FOO: 'arbitrary-override-secret' }),
+  })
+  assert.deepEqual(values, ['arbitrary-override-secret'])
+})
+
+test('safe errors are bounded before top-level stderr emission', () => {
+  const safe = safeError(new Error('x'.repeat(10_000)))
+  assert.ok(safe.message.length <= 401)
+  assert.equal(safe.message.endsWith('…'), true)
 })
 
 test('runtime gate rejects concurrent work and releases after completion', async () => {

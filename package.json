@@ -1,9 +1,12 @@
 {
   "name": "dsh-sdk-mcp",
-  "version": "0.1.0-phase0",
+  "version": "0.1.0-phase1",
   "private": true,
-  "description": "Phase 0 compatibility spike for an SDK-native DeepSeek Harness MCP bridge.",
+  "description": "SDK-native DeepSeek Harness MCP stdio bridge.",
   "type": "module",
+  "bin": {
+    "dsh-sdk-mcp": "./dist/index.js"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
@@ -11,11 +14,14 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
-    "phase0": "npm run build && node dist/phase0.js"
+    "phase0": "npm run build && node dist/phase0.js",
+    "mcp": "npm run build && node dist/index.js"
   },
   "dependencies": {
     "@deepseek-ai/dsh-sdk-client": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-sdk-protocol": "0.1.1-rc.2"
+    "@deepseek-ai/dsh-sdk-protocol": "0.1.1-rc.2",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-agent-spine-demo": "0.1.1-rc.2",

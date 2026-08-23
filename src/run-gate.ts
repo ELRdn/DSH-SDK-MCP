@@ -10,9 +10,15 @@ export class RuntimeBusyError extends Error {
 /** One active root run per runtime; never queues a second run. */
 export class RuntimeRunGate {
   private active = false
+  private readonly idleWaiters = new Set<() => void>()
 
   get isActive(): boolean {
     return this.active
+  }
+
+  waitForIdle(): Promise<void> {
+    if (!this.active) return Promise.resolve()
+    return new Promise((resolve) => this.idleWaiters.add(resolve))
   }
 
   async runExclusive<T>(task: () => Promise<T>): Promise<T> {
@@ -22,6 +28,8 @@ export class RuntimeRunGate {
       return await task()
     } finally {
       this.active = false
+      for (const resolve of this.idleWaiters) resolve()
+      this.idleWaiters.clear()
     }
   }
 }

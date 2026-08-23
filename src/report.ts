@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 
-import { redactArgs, redactSecretLike } from './config.js'
+import { redactArgs, redactSecretLike, secretValuesFromEnvironment } from './config.js'
 
 const require = createRequire(import.meta.url)
 
@@ -65,6 +65,8 @@ export interface Phase0Report {
   failures: string[]
 }
 
+export const MAX_SAFE_ERROR_MESSAGE_CHARS = 400
+
 export function packageVersion(packageName: string): string | null {
   try {
     const metadata = require(`${packageName}/package.json`) as { version?: unknown }
@@ -92,15 +94,25 @@ export function packageVersion(packageName: string): string | null {
     }
   }
 }
-export function safeError(error: unknown): { code?: string; message: string } {
+export function safeError(
+  error: unknown,
+  secretValues: readonly string[] = [],
+): { code?: string; message: string } {
+  const bounded = (message: string): string => (
+    message.length <= MAX_SAFE_ERROR_MESSAGE_CHARS
+      ? message
+      : `${message.slice(0, MAX_SAFE_ERROR_MESSAGE_CHARS)}…`
+  )
   if (error instanceof Error) {
     const candidate = error as Error & { code?: unknown }
     return {
-      code: typeof candidate.code === 'string' ? candidate.code : undefined,
-      message: redactSecretLike(error.message),
+      code: typeof candidate.code === 'string'
+        ? bounded(redactSecretLike(candidate.code, secretValues))
+        : undefined,
+      message: bounded(redactSecretLike(error.message, secretValues)),
     }
   }
-  return { message: redactSecretLike(String(error)) }
+  return { message: bounded(redactSecretLike(String(error), secretValues)) }
 }
 
 export function redactEnvironmentKeys(environment: NodeJS.ProcessEnv): string[] {
@@ -115,11 +127,14 @@ export function makeLaunchReport(
   cwd: string | undefined,
   environment: NodeJS.ProcessEnv,
 ): Phase0Report['launch'] {
+  const secretValues = secretValuesFromEnvironment(environment)
   return {
-    command: redactSecretLike(command),
-    args: redactArgs(args),
-    cwd,
-    cordisConfig: environment.DSH_CORDIS_CONFIG,
+    command: redactSecretLike(command, secretValues),
+    args: redactArgs(args, secretValues),
+    cwd: cwd === undefined ? undefined : redactSecretLike(cwd, secretValues),
+    cordisConfig: environment.DSH_CORDIS_CONFIG === undefined
+      ? undefined
+      : redactSecretLike(environment.DSH_CORDIS_CONFIG, secretValues),
     overrideKeys: redactEnvironmentKeys(environment),
   }
 }
@@ -136,6 +151,10 @@ export function stageInconclusive(details: Record<string, unknown> = {}): StageR
   return { status: 'inconclusive', details }
 }
 
-export function stageFailed(error: unknown, details: Record<string, unknown> = {}): StageResult {
-  return { status: 'failed', details, error: safeError(error) }
+export function stageFailed(
+  error: unknown,
+  details: Record<string, unknown> = {},
+  secretValues: readonly string[] = [],
+): StageResult {
+  return { status: 'failed', details, error: safeError(error, secretValues) }
 }

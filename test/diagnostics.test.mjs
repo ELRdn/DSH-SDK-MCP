@@ -106,7 +106,7 @@ test('tool diagnostics pair official callId and message.source.callId shapes', (
   assert.deepEqual(diagnostic.toolNames, ['fs.read'])
 })
 
-test('sandbox diagnostics never treat partial or unknown enforcement as full verification', async () => {
+test('sandbox diagnostics remain inconclusive until separately proven', async () => {
   const { classifySandboxCapability } = await import('../dist/diagnostics.js')
   const base = {
     filesystemToolEventsPaired: true,
@@ -116,8 +116,8 @@ test('sandbox diagnostics never treat partial or unknown enforcement as full ver
     sentinelsUnchanged: true,
   }
   assert.equal(classifySandboxCapability({ ...base, enforcement: 'unknown' }), 'inconclusive')
-  assert.equal(classifySandboxCapability({ ...base, enforcement: 'partial' }), 'observed-partial')
+  assert.equal(classifySandboxCapability({ ...base, enforcement: 'partial' }), 'inconclusive')
   assert.equal(classifySandboxCapability({ ...base, enforcement: 'full', filesystemToolEventsPaired: false }), 'inconclusive')
   assert.equal(classifySandboxCapability({ ...base, enforcement: 'full', sentinelsUnchanged: false }), 'failed')
-  assert.equal(classifySandboxCapability({ ...base, enforcement: 'full' }), 'verified-full')
+  assert.equal(classifySandboxCapability({ ...base, enforcement: 'full' }), 'inconclusive')
 })

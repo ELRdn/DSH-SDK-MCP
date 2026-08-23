@@ -22,6 +22,7 @@ export interface RunDiagnosticContext {
   provider?: string
   model?: string
   initialize: InitializeDiagnostic
+  secretValues?: readonly string[]
 }
 
 export interface TurnEndReasonDiagnostic {
@@ -78,42 +79,58 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-function boundedMessage(value: unknown): string | undefined {
+function boundedMessage(value: unknown, secretValues: readonly string[] = []): string | undefined {
   const text = asString(value)
   if (text === undefined) return undefined
-  const redacted = redactSecretLike(text)
+  const redacted = redactSecretLike(text, secretValues)
   return redacted.length <= MAX_ERROR_MESSAGE_LENGTH
     ? redacted
     : `${redacted.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…`
 }
 
-function increment(counts: Record<string, number>, key: string): void {
-  counts[key] = (counts[key] ?? 0) + 1
+function safeDiagnosticString(value: unknown, secretValues: readonly string[] = []): string | undefined {
+  return boundedMessage(value, secretValues)
+}
+
+function safeDiagnosticKey(value: unknown, secretValues: readonly string[] = []): string {
+  return boundedMessage(value, secretValues) ?? 'unknown'
+}
+
+function increment(
+  counts: Record<string, number>,
+  key: string,
+  secretValues: readonly string[] = [],
+): void {
+  const safeKey = safeDiagnosticKey(key, secretValues)
+  counts[safeKey] = (counts[safeKey] ?? 0) + 1
 }
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => value !== undefined))]
 }
 
-function statusTransitions(result: RunResult): string[] {
+function statusTransitions(result: RunResult, secretValues: readonly string[] = []): string[] {
   const transitions: string[] = []
   for (const notification of result.notifications) {
     if (notification.method !== 'session.status') continue
     const params = asRecord(notification.params)
-    const status = asString(params?.status)
+    const status = boundedMessage(params?.status, secretValues)
     if (status !== undefined && transitions.at(-1) !== status) transitions.push(status)
   }
   return transitions
 }
 
-function turnEndReason(event: RunResult['events'][number]): TurnEndReasonDiagnostic {
+function turnEndReason(
+  event: RunResult['events'][number],
+  secretValues: readonly string[] = [],
+): TurnEndReasonDiagnostic {
   const data = asRecord(event.data)
   const reason = asRecord(data?.reason)
   const error = asRecord(reason?.error)
   return {
-    kind: asString(reason?.kind),
-    errorCode: asString(error?.code),
-    errorMessage: boundedMessage(error?.message),
+    kind: safeDiagnosticString(reason?.kind, secretValues),
+    errorCode: boundedMessage(error?.code, secretValues),
+    errorMessage: boundedMessage(error?.message, secretValues),
   }
 }
 
@@ -122,10 +139,12 @@ export function summarizeRunResult(
   context: RunDiagnosticContext,
 ): RunDiagnostic {
   const eventCounts: Record<string, number> = {}
-  for (const event of result.events) increment(eventCounts, event.type)
+  for (const event of result.events) increment(eventCounts, event.type, context.secretValues)
 
   const notificationCounts: Record<string, number> = {}
-  for (const notification of result.notifications) increment(notificationCounts, notification.method)
+  for (const notification of result.notifications) {
+    increment(notificationCounts, notification.method, context.secretValues)
+  }
 
   const assistantMessageEvents = eventCounts['assistant/message'] ?? 0
   const finalResponseNonEmpty = result.finalResponse.trim().length > 0
@@ -134,7 +153,7 @@ export function summarizeRunResult(
     : result.finalResponse.includes(context.marker)
   const turnEndReasons = result.events
     .filter((event) => event.type === 'turn/end')
-    .map(turnEndReason)
+    .map((event) => turnEndReason(event, context.secretValues))
   const turnErrorCode = turnEndReasons.find((reason) => reason.errorCode !== undefined)?.errorCode
 
   let failureClassification = turnErrorCode
@@ -167,10 +186,10 @@ export function summarizeRunResult(
     turnEndEvents: eventCounts['turn/end'] ?? 0,
     inboxSplicedEvents: eventCounts['agent/inbox/spliced'] ?? 0,
     inboxReceiptPresent: (eventCounts['agent/inbox/spliced'] ?? 0) > 0,
-    statusTransitions: statusTransitions(result),
+    statusTransitions: statusTransitions(result, context.secretValues),
     turnEndReasons,
-    provider: context.provider,
-    model: context.model,
+    provider: boundedMessage(context.provider, context.secretValues),
+    model: boundedMessage(context.model, context.secretValues),
     initialize: context.initialize,
     failureClassification,
     providerOutcome,
@@ -186,16 +205,21 @@ function toolCallId(event: RunResult['events'][number]): string | undefined {
   return asString(source?.callId)
 }
 
-export function summarizeToolEvents(result: RunResult): ToolEventDiagnostic {
+export function summarizeToolEvents(
+  result: RunResult,
+  secretValues: readonly string[] = [],
+): ToolEventDiagnostic {
   const calls = result.events.filter((event) => event.type === 'tool/call')
   const results = result.events.filter((event) => event.type === 'tool/result')
   const callIds = uniqueStrings(calls.map(toolCallId))
+    .map((value) => safeDiagnosticString(value, secretValues) ?? 'unknown')
   const resultIds = uniqueStrings(results.map(toolCallId))
+    .map((value) => safeDiagnosticString(value, secretValues) ?? 'unknown')
   const unpairedCallIds = callIds.filter((id) => !resultIds.includes(id))
   const toolNames = uniqueStrings(calls.map((event) => {
     const data = asRecord(event.data)
     return asString(data?.name)
-  }))
+  })).map((value) => safeDiagnosticString(value, secretValues) ?? 'unknown')
 
   return {
     calls: calls.length,
@@ -222,13 +246,8 @@ export function classifySandboxCapability(
   probe: SandboxCapabilityProbe,
 ): SandboxCapabilityStatus {
   if (!probe.sentinelsUnchanged) return 'failed'
-  if (!probe.filesystemToolEventsPaired || !probe.powerShellToolEventsPaired) return 'inconclusive'
-  if (!probe.filesystemWriteDenied
-    || !probe.powerShellWriteDenied
-    || !probe.sentinelsUnchanged) return 'failed'
-  if (probe.enforcement === 'full'
-    && probe.filesystemToolEventsPaired
-    && probe.powerShellToolEventsPaired) return 'verified-full'
-  if (probe.enforcement === 'partial') return 'observed-partial'
+  // Tool-event text and unchanged sentinels are observations, not a security
+  // boundary. Keep the capability inconclusive until a separately proven
+  // enforcement mechanism is integrated.
   return 'inconclusive'
 }

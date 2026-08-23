@@ -12,6 +12,7 @@ import {
   loadPhase0Options,
   loadRuntimeLaunchConfig,
   redactSecretLike,
+  secretValuesFromEnvironment,
   type RuntimeLaunchConfig,
 } from './config.js'
 import { RuntimeRunGate } from './run-gate.js'
@@ -37,6 +38,7 @@ import {
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeProbePath = resolve(projectRoot, 'scripts', 'runtime-probe.mjs')
+const DIAGNOSTIC_LINE_LIMIT = 400
 
 interface AuditRecord {
   probePid?: number
@@ -100,6 +102,39 @@ async function readAudit(auditPath: string): Promise<AuditRecord | null> {
   }
 }
 
+async function waitForAuditExit(auditPath: string, timeoutMs = 5_000): Promise<AuditRecord> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const audit = await readAudit(auditPath)
+    if (audit !== null && (
+      audit.childExitCode !== null
+      || audit.childSignal !== null
+      || audit.error !== undefined
+    )) {
+      return audit
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 25))
+  }
+  throw new Error('Runtime probe audit did not observe child process exit')
+}
+
+async function waitForNoOrphans(pids: number[], timeoutMs = 5_000): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const orphanPids = pids.filter((pid) => processAlive(pid))
+    if (orphanPids.length === 0) return []
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 25))
+  }
+  return pids.filter((pid) => processAlive(pid))
+}
+
+function boundedRedactedDiagnostic(value: string, secretValues: readonly string[]): string {
+  const redacted = redactSecretLike(value, secretValues)
+  return redacted.length <= DIAGNOSTIC_LINE_LIMIT
+    ? redacted
+    : `${redacted.slice(0, DIAGNOSTIC_LINE_LIMIT)}…`
+}
+
 async function hashFile(filePath: string): Promise<string> {
   const content = await readFile(filePath)
   return createHash('sha256').update(content).digest('hex')
@@ -124,10 +159,6 @@ async function createWorkspaceFixture(): Promise<WorkspaceFixture> {
   return { root, sessions, auditPath, readmePath, fsSentinelPath, shellSentinelPath }
 }
 
-function eventTypes(result: RunResult): string[] {
-  return [...new Set(result.events.map((event) => event.type))]
-}
-
 function serializedEvents(result: RunResult): string {
   return JSON.stringify(result.events).toLowerCase()
 }
@@ -139,9 +170,21 @@ function idleObserved(result: RunResult): boolean {
   ))
 }
 
-function toolEvents(result: RunResult): ReturnType<typeof summarizeToolEvents> & { serialized: string } {
+function diagnosticToken(value: string, secretValues: readonly string[] = []): string {
+  const redacted = redactSecretLike(value, secretValues)
+  return redacted.length <= 400 ? redacted : `${redacted.slice(0, 400)}…`
+}
+
+function eventTypes(result: RunResult, secretValues: readonly string[] = []): string[] {
+  return [...new Set(result.events.map((event) => diagnosticToken(event.type, secretValues)))]
+}
+
+function toolEvents(
+  result: RunResult,
+  secretValues: readonly string[] = [],
+): ReturnType<typeof summarizeToolEvents> & { serialized: string } {
   return {
-    ...summarizeToolEvents(result),
+    ...summarizeToolEvents(result, secretValues),
     serialized: serializedEvents(result),
   }
 }
@@ -167,7 +210,10 @@ interface InitializeObserver {
   current(): InitializeDiagnostic
 }
 
-function observeInitialize(harness: DeepSeekHarness): InitializeObserver {
+function observeInitialize(
+  harness: DeepSeekHarness,
+  secretValues: readonly string[] = [],
+): InitializeObserver {
   const client = harness.client
   const originalInitialize = client.initialize.bind(client)
   let diagnostic: InitializeDiagnostic = { success: false }
@@ -175,10 +221,16 @@ function observeInitialize(harness: DeepSeekHarness): InitializeObserver {
   client.initialize = async (params: InitializeParams): Promise<InitializeResult> => {
     try {
       const result = await originalInitialize(params)
-      diagnostic = { success: true, serverInfo: result.serverInfo }
+      diagnostic = {
+        success: true,
+        serverInfo: {
+          name: boundedRedactedDiagnostic(result.serverInfo.name, secretValues),
+          version: boundedRedactedDiagnostic(result.serverInfo.version, secretValues),
+        },
+      }
       return result
     } catch (error) {
-      diagnostic = { success: false, error: safeError(error) }
+      diagnostic = { success: false, error: safeError(error, secretValues) }
       throw error
     }
   }
@@ -197,8 +249,9 @@ async function runProtocolSmoke(
   harness: DeepSeekHarness,
   gate: RuntimeRunGate,
   options: ReturnType<typeof loadPhase0Options>,
+  secretValues: readonly string[] = [],
 ): Promise<StageResult> {
-  const initialize = observeInitialize(harness)
+  const initialize = observeInitialize(harness, secretValues)
   let diagnostic: RunDiagnostic | undefined
   try {
     const result = await runWithGate(gate, () => harness.run(
@@ -210,6 +263,7 @@ async function runProtocolSmoke(
       provider: options.provider,
       model: options.model,
       initialize: initialize.current(),
+      secretValues,
     })
     const details = {
       diagnostics: diagnostic,
@@ -217,17 +271,17 @@ async function runProtocolSmoke(
       finalResponseNonEmpty: diagnostic.finalResponse.nonEmpty,
       markerFound: diagnostic.finalResponse.markerFound,
       idleObserved: idleObserved(result),
-      eventTypes: eventTypes(result),
+      eventTypes: eventTypes(result, secretValues),
     }
     if (!diagnostic.finalResponse.nonEmpty || !diagnostic.finalResponse.markerFound) {
-      return stageFailed(protocolFailure(diagnostic), details)
+      return stageFailed(protocolFailure(diagnostic), details, secretValues)
     }
     return stagePassed(details)
   } catch (error) {
     return stageFailed(error, {
       diagnostics: diagnostic,
       initialize: initialize.current(),
-    })
+    }, secretValues)
   }
 }
 
@@ -235,6 +289,7 @@ async function runToolSmoke(
   harness: DeepSeekHarness,
   gate: RuntimeRunGate,
   fixture: WorkspaceFixture,
+  secretValues: readonly string[] = [],
 ): Promise<StageResult> {
   try {
     const beforeReadme = await hashFile(fixture.readmePath)
@@ -247,7 +302,7 @@ async function runToolSmoke(
       ].join(' '),
       { sessionId: 'phase0-tool' },
     ))
-    const evidence = toolEvents(result)
+    const evidence = toolEvents(result, secretValues)
     const afterReadme = await hashFile(fixture.readmePath)
     const afterFsSentinel = await hashFile(fixture.fsSentinelPath)
     const readEvidence = /(?:"name":"read"|read(?:_file)?|tool-fs|filesystem)/i.test(evidence.serialized)
@@ -274,10 +329,10 @@ async function runToolSmoke(
       finalResponseNonEmpty: result.finalResponse.trim().length > 0,
       idleObserved: idleObserved(result),
       filesUnchanged: true,
-      eventTypes: eventTypes(result),
+      eventTypes: eventTypes(result, secretValues),
     })
   } catch (error) {
-    return stageFailed(error)
+    return stageFailed(error, {}, secretValues)
   }
 }
 
@@ -285,6 +340,7 @@ async function runLifecycleSmoke(
   harness: DeepSeekHarness,
   gate: RuntimeRunGate,
   fixture: WorkspaceFixture,
+  secretValues: readonly string[] = [],
 ): Promise<StageResult> {
   try {
     const first = await runWithGate(gate, () => harness.run(
@@ -319,7 +375,7 @@ async function runLifecycleSmoke(
 
     const secondOutcome = await secondRun.then(
       () => ({ ok: true as const }),
-      (error: unknown) => ({ ok: false as const, error: safeError(error) }),
+      (error: unknown) => ({ ok: false as const, error: safeError(error, secretValues) }),
     )
     if (secondOutcome.ok) throw new Error('Concurrent root run was not rejected')
     if (secondOutcome.error.code !== 'RUNTIME_BUSY') {
@@ -341,7 +397,7 @@ async function runLifecycleSmoke(
       workspace: basename(fixture.root),
     })
   } catch (error) {
-    return stageFailed(error)
+    return stageFailed(error, {}, secretValues)
   }
 }
 
@@ -349,6 +405,7 @@ async function runSandboxSmoke(
   launch: RuntimeLaunchConfig,
   options: ReturnType<typeof loadPhase0Options>,
   fixture: WorkspaceFixture,
+  secretValues: readonly string[] = [],
 ): Promise<StageResult> {
   if (platform() !== 'win32') {
     return stageSkipped('Windows native sandbox probe is required; current platform is not win32')
@@ -356,7 +413,7 @@ async function runSandboxSmoke(
   if (!existsSync(options.sandboxCordisConfig)) {
     return stageFailed(new Error(
       `Sandbox Cordis config does not exist: ${options.sandboxCordisConfig}`,
-    ))
+    ), {}, secretValues)
   }
 
   const auditPath = join(fixture.root, 'sandbox-runtime-audit.json')
@@ -389,7 +446,7 @@ async function runSandboxSmoke(
       { sessionId: 'phase0-sandbox-fs' },
     ))
     const afterFs = await hashFile(fixture.fsSentinelPath)
-    const fsEvents = toolEvents(fsResult)
+    const fsEvents = toolEvents(fsResult, secretValues)
     const fsDenied = afterFs === beforeFs
       && fsEvents.paired
       && /(?:denied|sandbox|read-only|FS_SANDBOX_DENIED)/i.test(fsEvents.serialized)
@@ -400,7 +457,7 @@ async function runSandboxSmoke(
       { sessionId: 'phase0-sandbox-pwsh' },
     ))
     const afterShell = await hashFile(fixture.shellSentinelPath)
-    const shellEvents = toolEvents(shellResult)
+    const shellEvents = toolEvents(shellResult, secretValues)
     const shellDenied = afterShell === beforeShell
       && shellEvents.paired
       && /(?:denied|sandbox|read-only|SANDBOX_UNAVAILABLE)/i.test(shellEvents.serialized)
@@ -431,22 +488,20 @@ async function runSandboxSmoke(
       filesystemToolCallIds: fsEvents.callIds,
       powerShellToolCallIds: shellEvents.callIds,
     }
-    smoke = capabilityStatus === 'verified-full'
-      ? stagePassed(details)
-      : capabilityStatus === 'failed'
-        ? stageFailed(new Error('Sandbox read-only enforcement was not proven'), details)
-        : stageInconclusive(details)
+    smoke = capabilityStatus === 'failed'
+      ? stageFailed(new Error('Sandbox read-only enforcement was not proven'), details, secretValues)
+      : stageInconclusive(details)
   } catch (error) {
-    smoke = stageFailed(error)
+    smoke = stageFailed(error, {}, secretValues)
   } finally {
-    cleanup = await closeHarness(harness, auditPath)
+    cleanup = await closeHarness(harness, auditPath, secretValues)
   }
 
   if (cleanup.status === 'failed') {
     return stageFailed(new Error('Sandbox runtime cleanup did not prove process exit'), {
       smoke,
       cleanup,
-    })
+    }, secretValues)
   }
   if (smoke.status === 'passed') return stagePassed({ ...smoke.details, cleanup: cleanup.details })
   if (smoke.status === 'inconclusive') {
@@ -468,15 +523,16 @@ function processAlive(pid: number | undefined): boolean {
 async function closeHarness(
   harness: DeepSeekHarness,
   auditPath: string,
+  secretValues: readonly string[] = [],
 ): Promise<StageResult> {
   try {
     await harness.close()
-    const audit = await readAudit(auditPath)
-    if (audit === null) throw new Error('Runtime probe audit was not written')
-    await new Promise((resolve) => setTimeout(resolve, 25))
+    const audit = await waitForAuditExit(auditPath)
     const protocolOnly = audit.nonProtocolLines.length === 0
     const childExited = audit.childExitCode !== null || audit.childSignal !== null || audit.error !== undefined
-    const orphanPids = [audit.probePid, audit.childPid].filter((pid) => processAlive(pid))
+    const orphanPids = await waitForNoOrphans(
+      [audit.probePid, audit.childPid].filter((pid): pid is number => pid !== undefined),
+    )
     if (!protocolOnly) throw new Error('Runtime emitted non-JSON-RPC stdout frames')
     if (!childExited) throw new Error('Runtime probe did not observe child process exit')
     if (orphanPids.length > 0) throw new Error(`Runtime process remained alive: ${orphanPids.join(',')}`)
@@ -490,11 +546,15 @@ async function closeHarness(
       orphanPids,
       orphanProcesses: false,
       stderrBytes: audit.stderrBytes,
-      stderrTail: audit.stderrTail.slice(-16).map(redactSecretLike),
-      runtimeProbeError: audit.error === undefined ? undefined : redactSecretLike(audit.error),
+      stderrTail: audit.stderrTail
+        .slice(-16)
+        .map((value) => boundedRedactedDiagnostic(value, secretValues)),
+      runtimeProbeError: audit.error === undefined
+        ? undefined
+        : boundedRedactedDiagnostic(audit.error, secretValues),
     })
   } catch (error) {
-    return stageFailed(error, { auditPath })
+    return stageFailed(error, { auditPath }, secretValues)
   }
 }
 
@@ -502,6 +562,7 @@ export async function runPhase0(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<Phase0Report> {
   const startedAt = new Date().toISOString()
+  const secretValues = secretValuesFromEnvironment(environment)
   const options = loadPhase0Options(environment, projectRoot)
   const launchEnvironment = environment.DSH_MCP_CORDIS_CONFIG?.trim()
     ? environment
@@ -510,12 +571,13 @@ export async function runPhase0(
   const fixture = await createWorkspaceFixture()
   const effectiveLaunch = withWorkspaceEnvironment(launch, fixture)
   const probeLaunch = createProbeLaunch(effectiveLaunch, fixture.auditPath)
+  const runtimePackageReportKey = redactSecretLike(options.runtimePackage, secretValues)
   const dependencies = {
     '@deepseek-ai/dsh-sdk-client': packageVersion('@deepseek-ai/dsh-sdk-client'),
     '@deepseek-ai/dsh-sdk-protocol': packageVersion('@deepseek-ai/dsh-sdk-protocol'),
     '@deepseek-ai/dsh-llm-pi-ai': packageVersion('@deepseek-ai/dsh-llm-pi-ai'),
     '@earendil-works/pi-ai': packageVersion('@earendil-works/pi-ai'),
-    [options.runtimePackage]: packageVersion(options.runtimePackage),
+    [runtimePackageReportKey]: packageVersion(options.runtimePackage),
   }
   const failures: string[] = []
   const stages = {
@@ -540,23 +602,25 @@ export async function runPhase0(
     const gate = new RuntimeRunGate()
 
     if (failures.length === 0 || environment.DSH_MCP_ALLOW_NON_WINDOWS === '1') {
-      stages.protocol = await runProtocolSmoke(harness, gate, options)
+      stages.protocol = await runProtocolSmoke(harness, gate, options, secretValues)
       stages.tool = stages.protocol.status === 'passed'
-        ? await runToolSmoke(harness, gate, fixture)
+        ? await runToolSmoke(harness, gate, fixture, secretValues)
         : stageSkipped('Protocol Smoke failed')
       stages.lifecycle = stages.tool.status === 'passed'
-        ? await runLifecycleSmoke(harness, gate, fixture)
+        ? await runLifecycleSmoke(harness, gate, fixture, secretValues)
         : stageSkipped('Tool Smoke failed')
-      stages.sandbox = await runSandboxSmoke(effectiveLaunch, options, fixture)
+      stages.sandbox = await runSandboxSmoke(effectiveLaunch, options, fixture, secretValues)
     }
   } catch (error) {
-    failures.push(safeError(error).message)
+    failures.push(safeError(error, secretValues).message)
   } finally {
-    if (harness !== undefined) stages.cleanup = await closeHarness(harness, fixture.auditPath)
+    if (harness !== undefined) {
+      stages.cleanup = await closeHarness(harness, fixture.auditPath, secretValues)
+    }
     try {
       await rm(fixture.root, { recursive: true, force: true })
     } catch (error) {
-      failures.push(`TEMP_CLEANUP_FAILED: ${safeError(error).message}`)
+      failures.push(`TEMP_CLEANUP_FAILED: ${safeError(error, secretValues).message}`)
     }
   }
 
@@ -579,12 +643,10 @@ export async function runPhase0(
   }
 
   const sandboxDetailStatus = stages.sandbox.details.capabilityStatus
-  const sandboxStatus: SandboxCapabilityStatus = sandboxDetailStatus === 'verified-full'
-    || sandboxDetailStatus === 'observed-partial'
-    || sandboxDetailStatus === 'inconclusive'
-    || sandboxDetailStatus === 'failed'
-    ? sandboxDetailStatus
-    : stages.sandbox.status === 'failed' ? 'failed' : 'inconclusive'
+  const sandboxStatus: SandboxCapabilityStatus = sandboxDetailStatus === 'failed'
+    || stages.sandbox.status === 'failed'
+    ? 'failed'
+    : 'inconclusive'
   const coreExecutedStages = coreStageEntries
     .map(([, stage]) => stage)
     .filter((stage) => stage.status !== 'skipped')
@@ -604,10 +666,10 @@ export async function runPhase0(
     status: coreStatus,
     coreStatus,
     phase1Eligible: false,
-    profile: options.profile,
-    provider: options.provider,
-    model: options.model,
-    credentialRef: options.credentialRef,
+    profile: redactSecretLike(options.profile, secretValues),
+    provider: redactSecretLike(options.provider, secretValues),
+    model: redactSecretLike(options.model, secretValues),
+    credentialRef: redactSecretLike(options.credentialRef, secretValues),
     startedAt,
     finishedAt,
     platform: {
@@ -644,7 +706,7 @@ export async function main(): Promise<void> {
       coreStatus: 'failed',
       phase1Eligible: false,
       sandboxCapability: { status: 'inconclusive', details: { reason: 'phase0 threw before report construction' } },
-      error: safeError(error),
+      error: safeError(error, secretValuesFromEnvironment(process.env)),
     }, null, 2)}\n`)
     process.exitCode = 1
   }
