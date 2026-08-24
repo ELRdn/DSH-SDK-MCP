@@ -1,8 +1,8 @@
-# dsh-sdk-mcp — Phase 4 Worktree-Isolated Parallel Write
+# dsh-sdk-mcp — Phase 5 Review & Integration Gate
 
-This repository contains the Phase 0 compatibility spike, the hardened Phase 1 MCP stdio bridge, the Phase 2 persistent subagent layer, the Phase 3 parallel-worker layer, and the narrowly scoped Phase 4 Git-worktree layer.
+This repository contains the Phase 0 compatibility spike, the hardened Phase 1 MCP stdio bridge, the Phase 2 persistent subagent layer, the Phase 3 parallel-worker layer, the Phase 4 Git-worktree layer, and the narrowly scoped Phase 5 review/integration gate.
 
-Phase 4 exposes exactly six tools:
+Phase 5 exposes exactly eight tools:
 
 - `dsh_health`
 - `dsh_delegate`
@@ -10,12 +10,14 @@ Phase 4 exposes exactly six tools:
 - `dsh_status`
 - `dsh_parallel`
 - `dsh_parallel_worktree`
+- `dsh_worktree_review`
+- `dsh_integrate`
 
 The bridge drives the existing official DSH TypeScript SDK/runtime path. It does not reimplement the DSH agent loop.
 
-Phase 1.1 hardening, Phase 2 lifecycle guarantees, and Phase 3's bounded semaphore remain mandatory. Phase 4 adds one high-level worktree workflow: each worker gets a bridge-owned Git worktree, its own SDK runtime/session, and its own Git index/working tree.
+Phase 1.1 hardening, Phase 2 lifecycle guarantees, and Phase 3's bounded semaphore remain mandatory. Phase 5 preserves the Phase 4 worktree workflow: each worker gets a bridge-owned Git worktree, its own SDK runtime/session, and its own Git index/working tree.
 
-The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 4 intentionally uses the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
+The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 5 intentionally preserves the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
 
 The spike validates:
 
@@ -94,16 +96,22 @@ The aggregate parallel result is bounded to 300,000 serialized characters. Indiv
 
 `dsh_parallel_worktree` requires an absolute Git working-tree path and an optional base ref. It validates the Git root/common directory, records `baseRef` and `baseCommit`, creates one generated branch (`dsh-mcp/dsh-wt-*`) and one bridge-owned temporary worktree per task, then runs the existing bounded worker path. Git status and changed-file metadata are collected from Git after execution; model narration is not trusted as Git evidence. The original working tree and branch are not used as worker workspaces.
 
-Bridge-owned worktrees live below a collision-resistant temporary root. Clean worktrees become cleanup-eligible when their runtime/session closes; dirty worktrees are preserved for parent review. The bridge never merges, cherry-picks, resolves conflicts, commits, pushes, creates a PR, or removes an unowned worktree automatically. A worktree is filesystem/Git-index isolation only, not a security sandbox.
+Bridge-owned worktrees live below a collision-resistant temporary root. Clean worktrees become cleanup-eligible when their runtime/session closes; dirty worktrees are preserved for parent review. A worktree is filesystem/Git-index isolation only, not a security sandbox.
 
-The keyless MCP tests use `test/fake-runtime.mjs`, including overlap, cap, workspace collision, partial failure, independent TTL, aggregate bounding, redaction, worktree isolation, clean/dirty cleanup, and shutdown coverage. The real OpenCode Go Phase 4 smoke is opt-in:
+`dsh_worktree_review` accepts exactly one worker `sessionId` or `worktreeId` and derives repository identity, base/current commit, dirty state, staged/unstaged/untracked counts, changed files, bounded diff statistics, status text, and conflict-marker metadata from Git. It does not trust worker narration. `dsh_integrate` accepts an absolute repository and worker session IDs in deterministic input order. It creates a fresh bridge-owned integration worktree from the verified base commit, creates bounded Git-native snapshots with a temporary index, and cherry-picks those snapshots only inside that integration worktree. It never changes the original branch, HEAD, or index.
+
+The complete `dsh_integrate` structured result is bounded to 300,000 serialized characters. `responseLength` reports the sanitized pre-truncation size and `responseTruncated` reports whether the bounded response policy reduced summaries or snapshot file lists.
+
+Integration conflicts are returned as structured metadata. Earlier workers are marked applied, the conflicting worker is marked conflict, later workers are marked pending, and the dirty integration worktree is preserved for inspection. There is no automatic conflict resolution, merge into the original checkout, push, PR, or LLM-based Git decision. Ignored and secret-like untracked files are excluded from snapshots; worker worktrees remain preserved. Clean integration worktrees are cleanup-eligible at bridge shutdown, while dirty conflict worktrees are not force-deleted.
+
+The keyless MCP tests use `test/fake-runtime.mjs`, including overlap, cap, workspace collision, partial failure, independent TTL, aggregate bounding, redaction, worktree isolation, review metadata, deterministic integration, conflict handling, clean/dirty cleanup, and shutdown coverage. The real OpenCode Go Phase 5 success/conflict smoke is opt-in:
 
 ```powershell
-$env:DSH_MCP_PHASE4_REAL_SMOKE = "1"
+$env:DSH_MCP_PHASE5_REAL_SMOKE = "1"
 npx --yes pnpm@11.7.0 test
 ```
 
-The smoke command prints one JSON report. It exits non-zero until the Windows gate passes.
+The smoke exercises `tools/list`, `dsh_health`, three real OpenCode Go workers with non-empty responses, `dsh_worktree_review`, A+B success integration, A+C conflict integration, original-tree protection, child JSON-RPC stdout purity, secret-free stderr, and clean shutdown. It exits non-zero until the Windows gate passes.
 
 For an explicitly non-Windows protocol experiment only:
 
@@ -129,10 +137,10 @@ That mode is not a Phase 0 completion result.
 - Runtime stdout is audited as newline-delimited JSON-RPC; diagnostics stay on stderr.
 - A `RuntimeRunGate` rejects a second root run on the same runtime with `RUNTIME_BUSY`; it never queues it.
 
-## Phase 0 gate
+## Phase 5 gate
 
-Phase 0 Core closes only when Protocol Smoke, Tool Smoke, lifecycle/concurrency, stdout/stderr, version, cleanup, and orphan-process checks pass on Windows native.
+Phase 5 closes only when the review metadata path, deterministic success integration, structured conflict path, original-tree protection, clean/dirty worktree lifecycle, stdout/stderr, secret redaction, and zero-orphan checks pass in keyless tests and the opt-in Windows-native OpenCode Go E2E. Phase 0–4 compatibility remains mandatory.
 
 Sandbox capability remains inconclusive and is not exposed as a security boundary or guarantee. Positive tool text and unchanged sentinels do not produce a `verified-full` result.
 
-Phase 4 intentionally does not include automatic merging, cherry-picking, conflict resolution, commit generation, push/PR automation, `dsh_cancel`, nested DSH orchestration, progress streaming, HTTP transport, MCP v2 migration, Git diff integration, or security sandbox claims. Phase 5 has not started.
+Phase 5 intentionally does not include merge into the original checkout, automatic conflict resolution, push/PR automation, `dsh_cancel`, nested DSH orchestration, progress streaming, HTTP transport, MCP v2 migration, or security sandbox claims. Phase 6 has not started.

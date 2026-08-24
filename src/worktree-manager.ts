@@ -81,11 +81,23 @@ function outputText(value: unknown): string {
   return ''
 }
 
-async function runGit(
+export interface GitCommandOptions {
+  readonly env?: NodeJS.ProcessEnv
+  readonly allowExitCodes?: readonly number[]
+}
+
+export interface GitCommandResult {
+  readonly stdout: string
+  readonly stderr: string
+  readonly exitCode: number
+}
+
+export async function runGitCommand(
   cwd: string,
   args: readonly string[],
   secretValues: readonly string[] = [],
-): Promise<string> {
+  options: GitCommandOptions = {},
+): Promise<GitCommandResult> {
   if (args.some((arg) => arg.includes('\0'))) {
     throw new WorktreeError('INVALID_GIT_ARGUMENT', 'Git arguments must not contain NUL characters')
   }
@@ -97,8 +109,13 @@ async function runGit(
       timeout: GIT_COMMAND_TIMEOUT_MS,
       maxBuffer: GIT_OUTPUT_LIMIT,
       shell: false,
+      ...(options.env === undefined ? {} : { env: { ...process.env, ...options.env } }),
     })
-    return outputText(result.stdout)
+    return {
+      stdout: outputText(result.stdout),
+      stderr: outputText(result.stderr),
+      exitCode: 0,
+    }
   } catch (error) {
     const details = error as {
       code?: unknown
@@ -107,6 +124,14 @@ async function runGit(
       stdout?: unknown
       stderr?: unknown
       message?: unknown
+    }
+    const exitCode = typeof details.code === 'number' ? details.code : -1
+    if (options.allowExitCodes?.includes(exitCode)) {
+      return {
+        stdout: bounded(outputText(details.stdout), secretValues),
+        stderr: bounded(outputText(details.stderr), secretValues),
+        exitCode,
+      }
     }
     const timedOut = details.killed === true || details.signal === 'SIGTERM'
     const output = outputText(details.stderr) || outputText(details.stdout)
@@ -121,6 +146,15 @@ async function runGit(
       { cause: error },
     )
   }
+}
+
+async function runGit(
+  cwd: string,
+  args: readonly string[],
+  secretValues: readonly string[] = [],
+  options: GitCommandOptions = {},
+): Promise<string> {
+  return (await runGitCommand(cwd, args, secretValues, options)).stdout
 }
 
 function validateRef(raw: string): string {
@@ -324,6 +358,16 @@ export class WorktreeManager {
 
   get(worktreeId: string): WorktreeRecord | undefined {
     return this.records.get(worktreeId)
+  }
+
+  getByIdentifier(identifier: string): WorktreeRecord | undefined {
+    const direct = this.records.get(identifier)
+    if (direct !== undefined) return direct
+    return [...this.records.values()].find((record) => record.sessionId === identifier)
+  }
+
+  getAll(): readonly WorktreeRecord[] {
+    return [...this.records.values()]
   }
 
   async inspect(worktreeId: string): Promise<WorktreeInspection> {

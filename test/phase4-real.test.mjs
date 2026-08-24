@@ -155,7 +155,7 @@ test('opt-in real OpenCode Go Phase 4 worktree smoke', {
     const listed = await client.listTools()
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
-      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_parallel', 'dsh_parallel_worktree', 'dsh_status'],
+      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_integrate', 'dsh_parallel', 'dsh_parallel_worktree', 'dsh_status', 'dsh_worktree_review'],
     )
 
     let health = await client.callTool({ name: 'dsh_health', arguments: {} })

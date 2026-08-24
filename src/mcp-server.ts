@@ -44,6 +44,7 @@ import {
 import { ParallelSemaphore, ParallelSemaphoreClosedError } from './parallel-semaphore.js'
 import { SessionRegistry } from './session-registry.js'
 import { WorktreeError, WorktreeManager, type GitRepositoryInfo, type WorktreeInspection, type WorktreeRecord } from './worktree-manager.js'
+import { IntegrationManager, type IntegrationResult, type WorktreeGitMetadata } from './integration-manager.js'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -52,12 +53,14 @@ export const PHASE3_VERSION = '0.3.0-phase3'
 export const PHASE2_VERSION = PHASE3_VERSION
 export const PHASE1_VERSION = PHASE3_VERSION
 export const PHASE4_VERSION = '0.4.0-phase4'
+export const PHASE5_VERSION = '0.5.0-phase5'
 export const DEFAULT_DELEGATION_TIMEOUT_MS = 900_000
 export const DEFAULT_HEALTH_TIMEOUT_MS = 30_000
 export const DEFAULT_RUNTIME_IDLE_TTL_MS = 300_000
 export const DEFAULT_MAX_PARALLEL = 3
 export const MAX_PARALLEL_AGGREGATE_RESPONSE_CHARS = 300_000
 export const MAX_DELEGATE_RESPONSE_CHARS = 100_000
+export const MAX_INTEGRATION_RESPONSE_CHARS = MAX_PARALLEL_AGGREGATE_RESPONSE_CHARS
 const MIN_RUNTIME_INITIALIZE_TIMEOUT_MS = 2_000
 const HEALTH_PROBE_TASK = 'Reply with exactly DSH_MCP_HEALTH_OK. Do not use any tools or modify files.'
 
@@ -234,6 +237,107 @@ const ParallelWorktreeOutputSchema = z.object({
   }).optional(),
 })
 
+const WorktreeReviewInputSchema = z.object({
+  sessionId: z.string().min(1).max(256).optional(),
+  worktreeId: z.string().min(1).max(256).optional(),
+}).strict()
+
+const WorktreeReviewOutputSchema = z.object({
+  ok: z.boolean(),
+  worktreeId: z.string(),
+  sessionId: z.string().optional(),
+  name: z.string(),
+  repository: z.string(),
+  repositoryIdentity: z.string(),
+  commonDir: z.string(),
+  worktreePath: z.string(),
+  branch: z.string(),
+  baseRef: z.string(),
+  baseCommit: z.string(),
+  currentHead: z.string(),
+  cleanupState: WorktreeCleanupStateSchema,
+  dirty: z.boolean(),
+  clean: z.boolean(),
+  stagedCount: z.number().int().nonnegative(),
+  unstagedCount: z.number().int().nonnegative(),
+  untrackedCount: z.number().int().nonnegative(),
+  changedFiles: z.array(z.string()),
+  changedFilesTruncated: z.boolean(),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  diffSummary: z.string(),
+  gitStatusSummary: z.string(),
+  conflictMarkers: z.array(z.string()),
+  conflictMarkersTruncated: z.boolean(),
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+})
+
+const IntegrationWorkerInputSchema = z.object({
+  sessionId: z.string().min(1).max(256),
+}).strict()
+
+const IntegrationInputSchema = z.object({
+  repo: z.string().min(1).max(4_096),
+  workers: z.array(IntegrationWorkerInputSchema).min(1).max(MAX_PARALLEL_HARD_LIMIT),
+  baseRef: z.string().min(1).max(256).optional(),
+}).strict()
+
+const IntegrationWorkerSchema = z.object({
+  sessionId: z.string(),
+  worktreeId: z.string(),
+  name: z.string(),
+  status: z.enum(['applied', 'empty', 'conflict', 'pending']),
+  snapshotCommit: z.string(),
+})
+
+const SnapshotMetadataSchema = z.object({
+  snapshotId: z.string(),
+  snapshotCommit: z.string(),
+  snapshotTree: z.string(),
+  sourceHead: z.string(),
+  worktreeId: z.string(),
+  sessionId: z.string(),
+  name: z.string(),
+  changedFiles: z.array(z.string()),
+  includedUntrackedFiles: z.array(z.string()),
+  excludedUntrackedFiles: z.array(z.string()),
+})
+
+const IntegrationOutputSchema = z.object({
+  ok: z.boolean(),
+  status: z.enum(['applied', 'conflict', 'error']),
+  integrationWorktreeId: z.string(),
+  integrationWorktreePath: z.string(),
+  integrationBranch: z.string(),
+  repository: z.string(),
+  repositoryIdentity: z.string(),
+  commonDir: z.string(),
+  baseRef: z.string(),
+  baseCommit: z.string(),
+  currentHead: z.string(),
+  integrationWorktreeDirty: z.boolean(),
+  clean: z.boolean(),
+  stagedCount: z.number().int().nonnegative(),
+  unstagedCount: z.number().int().nonnegative(),
+  untrackedCount: z.number().int().nonnegative(),
+  changedFiles: z.array(z.string()),
+  changedFilesTruncated: z.boolean(),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  diffSummary: z.string(),
+  gitStatusSummary: z.string(),
+  conflictMarkers: z.array(z.string()),
+  conflictMarkersTruncated: z.boolean(),
+  appliedWorkers: z.array(IntegrationWorkerSchema),
+  pendingWorkers: z.array(IntegrationWorkerSchema),
+  conflictingWorker: IntegrationWorkerSchema.optional(),
+  conflictingFiles: z.array(z.string()),
+  snapshotMetadata: z.array(SnapshotMetadataSchema),
+  responseLength: z.number().int().nonnegative(),
+  responseTruncated: z.boolean(),
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+})
+
 export type DshHealthOutput = z.infer<typeof HealthOutputSchema>
 export type DshDelegateInput = z.infer<typeof DelegateInputSchema>
 export type DshDelegateOutput = z.infer<typeof DelegateOutputSchema>
@@ -245,6 +349,10 @@ export type DshParallelOutput = z.infer<typeof ParallelOutputSchema>
 export type DshParallelWorktreeInput = z.infer<typeof ParallelWorktreeInputSchema>
 export type DshParallelWorktreeOutput = z.infer<typeof ParallelWorktreeOutputSchema>
 export type DshParallelWorkerResult = z.infer<typeof ParallelWorkerResultSchema>
+export type DshWorktreeReviewInput = z.infer<typeof WorktreeReviewInputSchema>
+export type DshWorktreeReviewOutput = z.infer<typeof WorktreeReviewOutputSchema>
+export type DshIntegrateInput = z.infer<typeof IntegrationInputSchema>
+export type DshIntegrateOutput = z.infer<typeof IntegrationOutputSchema>
 
 type BridgeError = {
   code: string
@@ -795,6 +903,200 @@ function worktreeToolResult(output: DshParallelWorktreeOutput) {
   }
 }
 
+function emptyReviewOutput(error: BridgeError, secretValues: readonly string[] = []): DshWorktreeReviewOutput {
+  return {
+    ok: false,
+    worktreeId: '',
+    name: '',
+    repository: '',
+    repositoryIdentity: '',
+    commonDir: '',
+    worktreePath: '',
+    branch: '',
+    baseRef: '',
+    baseCommit: '',
+    currentHead: '',
+    cleanupState: 'not_created',
+    dirty: false,
+    clean: true,
+    stagedCount: 0,
+    unstagedCount: 0,
+    untrackedCount: 0,
+    changedFiles: [],
+    changedFilesTruncated: false,
+    additions: 0,
+    deletions: 0,
+    diffSummary: '',
+    gitStatusSummary: '',
+    conflictMarkers: [],
+    conflictMarkersTruncated: false,
+    error: { code: safeCode(error.code, secretValues), message: boundedSafeMessage(error.message, secretValues) },
+  }
+}
+
+function reviewOutput(record: WorktreeRecord, metadata: WorktreeGitMetadata, secretValues: readonly string[] = []): DshWorktreeReviewOutput {
+  return {
+    ok: true,
+    worktreeId: redactSecretLike(record.worktreeId, secretValues),
+    ...(record.sessionId === undefined ? {} : { sessionId: redactSecretLike(record.sessionId, secretValues) }),
+    name: redactSecretLike(record.name, secretValues),
+    repository: redactSecretLike(record.repository.root, secretValues),
+    repositoryIdentity: redactSecretLike(record.repository.identity, secretValues),
+    commonDir: redactSecretLike(record.repository.commonDir, secretValues),
+    worktreePath: redactSecretLike(record.path, secretValues),
+    branch: redactSecretLike(record.branch, secretValues),
+    baseRef: redactSecretLike(record.repository.baseRef, secretValues),
+    baseCommit: redactSecretLike(record.repository.baseCommit, secretValues),
+    currentHead: redactSecretLike(metadata.currentHead, secretValues),
+    cleanupState: record.cleanupState,
+    dirty: metadata.dirty,
+    clean: !metadata.dirty,
+    stagedCount: metadata.stagedCount,
+    unstagedCount: metadata.unstagedCount,
+    untrackedCount: metadata.untrackedCount,
+    changedFiles: metadata.changedFiles.map((file) => redactSecretLike(file, secretValues)),
+    changedFilesTruncated: metadata.changedFilesTruncated,
+    additions: metadata.additions,
+    deletions: metadata.deletions,
+    diffSummary: redactSecretLike(metadata.diffSummary, secretValues),
+    gitStatusSummary: redactSecretLike(metadata.gitStatusSummary, secretValues),
+    conflictMarkers: metadata.conflictMarkers.map((marker) => redactSecretLike(marker, secretValues)),
+    conflictMarkersTruncated: metadata.conflictMarkersTruncated,
+  }
+}
+
+function worktreeReviewToolResult(output: DshWorktreeReviewOutput) {
+  const summary = {
+    ok: output.ok,
+    worktreeId: output.worktreeId,
+    ...(output.sessionId === undefined ? {} : { sessionId: output.sessionId }),
+    dirty: output.dirty,
+    clean: output.clean,
+    changedFileCount: output.changedFiles.length,
+    stagedCount: output.stagedCount,
+    unstagedCount: output.unstagedCount,
+    untrackedCount: output.untrackedCount,
+    ...(output.error === undefined ? {} : { error: output.error }),
+  }
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(summary) }],
+    structuredContent: output,
+    ...(output.ok ? {} : { isError: true }),
+  }
+}
+
+function emptyIntegrationOutput(repo: string, baseRef: string, error: BridgeError, secretValues: readonly string[] = []): DshIntegrateOutput {
+  return {
+    ok: false,
+    status: 'error',
+    integrationWorktreeId: '',
+    integrationWorktreePath: '',
+    integrationBranch: '',
+    repository: redactSecretLike(repo, secretValues),
+    repositoryIdentity: '',
+    commonDir: '',
+    baseRef: redactSecretLike(baseRef, secretValues),
+    baseCommit: '',
+    currentHead: '',
+    integrationWorktreeDirty: false,
+    clean: true,
+    stagedCount: 0,
+    unstagedCount: 0,
+    untrackedCount: 0,
+    changedFiles: [],
+    changedFilesTruncated: false,
+    additions: 0,
+    deletions: 0,
+    diffSummary: '',
+    gitStatusSummary: '',
+    conflictMarkers: [],
+    conflictMarkersTruncated: false,
+    appliedWorkers: [],
+    pendingWorkers: [],
+    conflictingFiles: [],
+    snapshotMetadata: [],
+    responseLength: 0,
+    responseTruncated: false,
+    error: { code: safeCode(error.code, secretValues), message: boundedSafeMessage(error.message, secretValues) },
+  }
+}
+
+function clipIntegrationText(value: string, limit: number): string {
+  if (value.length <= limit) return value
+  return `${value.slice(0, Math.max(0, limit - 1))}…`
+}
+
+function clipIntegrationList(values: readonly string[], limit: number): string[] {
+  return values.slice(0, limit).map((value) => clipIntegrationText(value, 256))
+}
+
+function boundedIntegrationOutput(output: IntegrationResult): DshIntegrateOutput {
+  const responseLength = JSON.stringify(output).length
+  const base = { ...output, responseLength, responseTruncated: false } as DshIntegrateOutput
+  if (JSON.stringify(base).length <= MAX_INTEGRATION_RESPONSE_CHARS) return base
+
+  const snapshotMetadata = output.snapshotMetadata.map((snapshot) => ({
+    ...snapshot,
+    changedFiles: clipIntegrationList(snapshot.changedFiles, 4),
+    includedUntrackedFiles: clipIntegrationList(snapshot.includedUntrackedFiles, 4),
+    excludedUntrackedFiles: clipIntegrationList(snapshot.excludedUntrackedFiles, 4),
+  }))
+  const bounded: DshIntegrateOutput = {
+    ...base,
+    responseTruncated: true,
+    changedFiles: clipIntegrationList(output.changedFiles, 64),
+    changedFilesTruncated: true,
+    diffSummary: clipIntegrationText(output.diffSummary, 8_000),
+    gitStatusSummary: clipIntegrationText(output.gitStatusSummary, 8_000),
+    conflictMarkers: clipIntegrationList(output.conflictMarkers, 16),
+    conflictMarkersTruncated: true,
+    snapshotMetadata,
+  }
+  if (JSON.stringify(bounded).length <= MAX_INTEGRATION_RESPONSE_CHARS) return bounded
+
+  bounded.diffSummary = clipIntegrationText(output.diffSummary, 1_024)
+  bounded.gitStatusSummary = clipIntegrationText(output.gitStatusSummary, 1_024)
+  bounded.changedFiles = clipIntegrationList(output.changedFiles, 16)
+  bounded.conflictMarkers = clipIntegrationList(output.conflictMarkers, 4)
+  bounded.snapshotMetadata = output.snapshotMetadata.map((snapshot) => ({
+    ...snapshot,
+    changedFiles: clipIntegrationList(snapshot.changedFiles, 1),
+    includedUntrackedFiles: clipIntegrationList(snapshot.includedUntrackedFiles, 1),
+    excludedUntrackedFiles: clipIntegrationList(snapshot.excludedUntrackedFiles, 1),
+  }))
+  if (JSON.stringify(bounded).length <= MAX_INTEGRATION_RESPONSE_CHARS) return bounded
+
+  bounded.diffSummary = ''
+  bounded.gitStatusSummary = ''
+  bounded.changedFiles = []
+  bounded.conflictMarkers = []
+  bounded.snapshotMetadata = []
+  return bounded
+}
+
+function integrationToolResult(output: DshIntegrateOutput) {
+  const summary = {
+    ok: output.ok,
+    status: output.status,
+    integrationWorktreeId: output.integrationWorktreeId,
+    integrationWorktreePath: output.integrationWorktreePath,
+    currentHead: output.currentHead,
+    clean: output.clean,
+    changedFileCount: output.changedFiles.length,
+    responseLength: output.responseLength,
+    responseTruncated: output.responseTruncated,
+    appliedWorkers: output.appliedWorkers.map((worker) => ({ sessionId: worker.sessionId, status: worker.status })),
+    pendingWorkers: output.pendingWorkers.map((worker) => ({ sessionId: worker.sessionId, status: worker.status })),
+    conflictingFiles: output.conflictingFiles,
+    ...(output.error === undefined ? {} : { error: output.error }),
+  }
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(summary) }],
+    structuredContent: output,
+    ...(output.ok ? {} : { isError: true }),
+  }
+}
+
 function hasCredential(environment: NodeJS.ProcessEnv, options: Phase0Options): boolean {
   const references = new Set([options.credentialRef])
   if (options.profile === 'opencode-go') {
@@ -826,6 +1128,7 @@ export class Phase1McpBridge {
   private readonly pool: RuntimePool
   private readonly parallelSemaphore: ParallelSemaphore
   private readonly worktrees: WorktreeManager
+  private readonly integrationManager: IntegrationManager
   private activeHarness: DeepSeekHarness | undefined
   private closeTask: Promise<void> | undefined
   private closed = false
@@ -865,6 +1168,7 @@ export class Phase1McpBridge {
     this.worktrees = new WorktreeManager({
       secretValues: () => this.redactionSecrets(),
     })
+    this.integrationManager = new IntegrationManager(this.worktrees, () => this.redactionSecrets())
   }
 
   private redactionSecrets(): string[] {
@@ -1108,7 +1412,7 @@ export class Phase1McpBridge {
 
     return {
       ok: runtimeReady && providerReady,
-      bridgeVersion: PHASE4_VERSION,
+      bridgeVersion: PHASE5_VERSION,
       nodeVersion: process.version,
       platform: process.platform,
       arch: arch(),
@@ -1497,6 +1801,64 @@ export class Phase1McpBridge {
     return boundedWorktreeOutput(repo, baseRef, baseCommit, completed)
   }
 
+  async worktreeReview(input: DshWorktreeReviewInput): Promise<DshWorktreeReviewOutput> {
+    const secretValues = this.redactionSecrets()
+    const suppliedIdentifiers = [input.sessionId, input.worktreeId].filter((value): value is string => value !== undefined)
+    if (suppliedIdentifiers.length !== 1) {
+      return emptyReviewOutput({ code: 'INVALID_WORKER_IDENTIFIER', message: 'Provide exactly one sessionId or worktreeId' }, secretValues)
+    }
+    const record = this.worktrees.getByIdentifier(suppliedIdentifiers[0])
+    if (record === undefined) {
+      return emptyReviewOutput({ code: 'WORKER_NOT_FOUND', message: 'The requested worker worktree does not exist' }, secretValues)
+    }
+    try {
+      return reviewOutput(record, await this.integrationManager.review(record), secretValues)
+    } catch (error) {
+      return emptyReviewOutput(worktreeErrorFrom(error, secretValues), secretValues)
+    }
+  }
+
+  async integrate(input: DshIntegrateInput): Promise<DshIntegrateOutput> {
+    const secretValues = this.redactionSecrets()
+    const requestedBaseRef = input.baseRef?.trim() || 'HEAD'
+    if (this.closed) {
+      return emptyIntegrationOutput(input.repo, requestedBaseRef, { code: 'BRIDGE_CLOSED', message: 'The MCP bridge is shutting down' }, secretValues)
+    }
+    let repository: GitRepositoryInfo
+    try {
+      repository = await this.worktrees.validateRepository(input.repo, requestedBaseRef)
+    } catch (error) {
+      return emptyIntegrationOutput(input.repo, requestedBaseRef, worktreeErrorFrom(error, secretValues), secretValues)
+    }
+    const records: WorktreeRecord[] = []
+    const seen = new Set<string>()
+    for (const worker of input.workers) {
+      if (seen.has(worker.sessionId)) {
+        return emptyIntegrationOutput(input.repo, requestedBaseRef, { code: 'DUPLICATE_WORKER', message: 'A worker session may appear only once' }, secretValues)
+      }
+      seen.add(worker.sessionId)
+      const record = this.worktrees.getByIdentifier(worker.sessionId)
+      if (record === undefined || record.sessionId !== worker.sessionId) {
+        return emptyIntegrationOutput(input.repo, requestedBaseRef, { code: 'WORKER_NOT_FOUND', message: 'The requested worker session does not exist' }, secretValues)
+      }
+      if (record.cleanupState === 'removed') {
+        return emptyIntegrationOutput(input.repo, requestedBaseRef, { code: 'WORKER_NOT_FOUND', message: 'The requested worker worktree is no longer active' }, secretValues)
+      }
+      if (record.repository.identity !== repository.identity || record.repository.commonDir !== repository.commonDir) {
+        return emptyIntegrationOutput(input.repo, requestedBaseRef, { code: 'WORKER_REPOSITORY_MISMATCH', message: 'All worker sessions must belong to the requested repository' }, secretValues)
+      }
+      if (record.repository.baseCommit !== repository.baseCommit) {
+        return emptyIntegrationOutput(input.repo, requestedBaseRef, { code: 'BASE_COMMIT_MISMATCH', message: 'All worker sessions must use the verified integration base commit' }, secretValues)
+      }
+      records.push(record)
+    }
+    try {
+      return boundedIntegrationOutput(await this.integrationManager.integrate(repository, records))
+    } catch (error) {
+      return emptyIntegrationOutput(input.repo, requestedBaseRef, worktreeErrorFrom(error, secretValues), secretValues)
+    }
+  }
+
   async continue(input: DshContinueInput): Promise<DshDelegateOutput> {
     const startedAt = Date.now()
     const secretValues = this.redactionSecrets()
@@ -1643,7 +2005,7 @@ export class Phase1McpBridge {
 export function createMcpServer(bridge = new Phase1McpBridge()): McpServer {
   const server = new McpServer({
     name: 'dsh-sdk-mcp-server',
-    version: PHASE4_VERSION,
+    version: PHASE5_VERSION,
   })
 
   server.registerTool(
@@ -1755,6 +2117,40 @@ export function createMcpServer(bridge = new Phase1McpBridge()): McpServer {
       },
     },
     async (input) => worktreeToolResult(await bridge.parallelWorktree(input)),
+  )
+
+  server.registerTool(
+    'dsh_worktree_review',
+    {
+      title: 'Review DSH Worktree',
+      description: 'Review trusted Git metadata for an owned worker or integration worktree. Changed files and summaries are derived from Git, not model narration, and bounded before return.',
+      inputSchema: WorktreeReviewInputSchema,
+      outputSchema: WorktreeReviewOutputSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => worktreeReviewToolResult(await bridge.worktreeReview(input)),
+  )
+
+  server.registerTool(
+    'dsh_integrate',
+    {
+      title: 'Integrate DSH Worktrees',
+      description: 'Apply owned worker snapshots in deterministic input order inside a fresh bridge-owned integration worktree. The original repository branch, index, HEAD, and working tree are never modified; conflicts are returned without automatic resolution.',
+      inputSchema: IntegrationInputSchema,
+      outputSchema: IntegrationOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (input) => integrationToolResult(await bridge.integrate(input)),
   )
 
   return server

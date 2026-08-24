@@ -1,6 +1,6 @@
 {
   "name": "dsh-sdk-mcp",
-  "version": "0.4.0-phase4",
+  "version": "0.5.0-phase5",
   "private": true,
   "description": "SDK-native DeepSeek Harness MCP stdio bridge.",
   "type": "module",

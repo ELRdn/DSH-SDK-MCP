@@ -67,7 +67,7 @@ test('tools/list exposes the Phase 4 worktree workflow as one additional public 
     const listed = await client.listTools()
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
-      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_parallel', 'dsh_parallel_worktree', 'dsh_status'],
+      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_integrate', 'dsh_parallel', 'dsh_parallel_worktree', 'dsh_status', 'dsh_worktree_review'],
     )
   } finally {
     await closeClient(client, transport)
