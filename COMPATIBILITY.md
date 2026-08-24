@@ -1,8 +1,8 @@
 # Compatibility
 
-## MCP TypeScript SDK audit — Phase 3
+## MCP TypeScript SDK audit — Phase 4
 
-The Phase 3 bridge intentionally remains on the v1 monolithic MCP package:
+The Phase 4 bridge intentionally remains on the v1 monolithic MCP package:
 
 - pinned package: `@modelcontextprotocol/sdk@1.30.0`
 - schema dependency: `zod@4.4.3`
@@ -21,21 +21,21 @@ The installed v1 SDK declares these legacy protocol revisions:
 2024-10-07
 ```
 
-The live Phase 1 server audit, retained by the Phase 3 implementation, negotiated:
+The live Phase 1 server audit, retained by the Phase 4 implementation, negotiated:
 
 ```text
 initialize response protocolVersion: 2025-11-25
 server/discover: -32601 Method not found
 ```
 
-Therefore this server is a legacy 2025-era MCP server, not a v2/modern `2026-07-28` server. The v2 stable line is the split package [`@modelcontextprotocol/server`](https://github.com/modelcontextprotocol/typescript-sdk/tree/main/packages/server); its modern stdio entry point is `serveStdio(() => buildServer())`. Phase 3 preserves v1 because v2 migration remains explicitly out of scope.
+Therefore this server is a legacy 2025-era MCP server, not a v2/modern `2026-07-28` server. The v2 stable line is the split package [`@modelcontextprotocol/server`](https://github.com/modelcontextprotocol/typescript-sdk/tree/main/packages/server); its modern stdio entry point is `serveStdio(() => buildServer())`. Phase 4 preserves v1 because v2 migration remains explicitly out of scope.
 
 ## Host compatibility
 
-Codex and Claude Code both support local MCP servers over stdio ([Codex MCP/stdio guidance](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), [Claude Code local stdio configuration](https://code.claude.com/docs/en/mcp)). This Phase 3 server uses the common legacy lifecycle and `tools/list` / `tools/call` surface for five tools (`dsh_health`, `dsh_delegate`, `dsh_continue`, `dsh_status`, `dsh_parallel`), so it does not require v2-only `server/discover`, modern envelopes, HTTP, progress, or subscription features.
+Codex and Claude Code both support local MCP servers over stdio ([Codex MCP/stdio guidance](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), [Claude Code local stdio configuration](https://code.claude.com/docs/en/mcp)). This Phase 4 server uses the common legacy lifecycle and `tools/list` / `tools/call` surface for six tools (`dsh_health`, `dsh_delegate`, `dsh_continue`, `dsh_status`, `dsh_parallel`, `dsh_parallel_worktree`), so it does not require v2-only `server/discover`, modern envelopes, HTTP, progress, or subscription features.
 
-Host configuration compatibility is documented, but a live Codex-host and Claude-Code-host matrix run remains outside this Phase 3 acceptance pass. The repository's MCP client integration tests use the same pinned v1 SDK and the live server's legacy handshake.
+Host configuration compatibility is documented, but a live Codex-host and Claude-Code-host matrix run remains outside this Phase 4 acceptance pass. The repository's MCP client integration tests use the same pinned v1 SDK and the live server's legacy handshake.
 
 ## Scope boundary
 
-Do not infer v2 migration or sandbox guarantees from this compatibility record. Phase 3 includes bounded `dsh_parallel` over disjoint workspaces; same-workspace parallelism, cancellation, HTTP transport, progress streaming, Git diff/worktree automation, nested DSH orchestration, and MCP v2 migration remain out of scope.
+Do not infer v2 migration or sandbox guarantees from this compatibility record. Phase 4 includes bounded `dsh_parallel_worktree` over bridge-owned Git worktrees and preserves the Phase 3 disjoint-workspace behavior. Worktree isolation is not a security sandbox. Automatic merge/cherry-pick/conflict resolution/commit/push/PR actions, cancellation, HTTP transport, progress streaming, Git diff integration, nested DSH orchestration, and MCP v2 migration remain out of scope; Phase 5 has not started.

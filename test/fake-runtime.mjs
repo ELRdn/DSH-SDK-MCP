@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 
@@ -19,7 +19,9 @@ function updateAudit(fields) {
   if (auditFile === undefined) return
   let current = {}
   try { current = JSON.parse(readFileSync(auditFile, 'utf8')) } catch {}
-  writeFileSync(auditFile, `${JSON.stringify({ ...current, pid: process.pid, ...fields })}\n`, 'utf8')
+  const tempAuditFile = `${auditFile}.tmp-${process.pid}`
+  writeFileSync(tempAuditFile, `${JSON.stringify({ ...current, pid: process.pid, ...fields })}\n`, 'utf8')
+  renameSync(tempAuditFile, auditFile)
 }
 
 function cleanup() {
@@ -173,6 +175,13 @@ input.on('line', (line) => {
       : mode === 'health-superstring'
         ? 'DSH_MCP_HEALTH_OKAY'
         : requestedContent
+    if (mode === 'phase4-write' || mode === 'phase4-write-slow') {
+      const match = /^WRITE_FILE=([^:]+):(.*)$/.exec(requestedContent)
+      if (match && process.env.DSH_CWD) {
+        writeFileSync(join(process.env.DSH_CWD, match[1]), match[2], 'utf8')
+        content = `WROTE:${match[1]}`
+      }
+    }
     if (mode === 'parallel-huge') {
       content = 'H'.repeat(120_000)
     }
@@ -241,6 +250,7 @@ input.on('line', (line) => {
       || mode === 'phase2-context-slow'
       || mode === 'parallel-slow'
       || mode === 'parallel-context-slow'
+      || mode === 'phase4-write-slow'
     ) {
       const delayMs = Number(process.env.DSH_PHASE3_FAKE_DELAY_MS) || 300
       setTimeout(emitResponse, delayMs).unref()

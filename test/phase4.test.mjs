@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -109,6 +109,8 @@ test('dsh_parallel_worktree creates distinct worktrees from one base commit and 
     assert.equal(result.structuredContent.results.length, 2)
     const [workerA, workerB] = result.structuredContent.results
     assert.notEqual(workerA.worktreePath, workerB.worktreePath)
+    assert.equal(isAbsolute(workerA.worktreePath), true)
+    assert.equal(isAbsolute(workerB.worktreePath), true)
     assert.equal(workerA.baseCommit, baseCommit)
     assert.equal(workerB.baseCommit, baseCommit)
     assert.equal(workerA.changedFiles.includes('worker-a.txt'), true)

@@ -47,7 +47,7 @@ export interface RuntimeLease {
 export interface RuntimePoolOptions {
   idleTtlMs: number
   createRuntime: (spec: RuntimeSpec) => Promise<RuntimeResource>
-  onRuntimeClosed?: (runtime: RuntimeHandle) => void
+  onRuntimeClosed?: (runtime: RuntimeHandle) => void | Promise<void>
 }
 
 /**
@@ -173,14 +173,25 @@ export class RuntimePool {
     if (this.runtimes.get(runtime.key) === runtime) this.runtimes.delete(runtime.key)
     runtime.claimed = false
     runtime.closeTask = (async () => {
-      this.onRuntimeClosed?.(runtime)
+      let resourceError: unknown
       try {
         // RuntimeResource.dispose owns both the SDK child and its temp root.
         await this.resourceDispose(runtime)
+      } catch (error) {
+        resourceError = error
+      }
+
+      let hookError: unknown
+      try {
+        await this.onRuntimeClosed?.(runtime)
+      } catch (error) {
+        hookError = error
       } finally {
         this.resourceMap.delete(runtime)
         if (this.closing.get(runtime.key) === runtime.closeTask) this.closing.delete(runtime.key)
       }
+      if (resourceError !== undefined) throw resourceError
+      if (hookError !== undefined) throw hookError
     })()
     this.closing.set(runtime.key, runtime.closeTask)
     return runtime.closeTask

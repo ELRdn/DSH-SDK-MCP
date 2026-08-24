@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto'
 import { execFile as execFileCallback } from 'node:child_process'
 import { mkdtemp, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import { redactSecretLike } from './config.js'
@@ -162,6 +163,9 @@ export class WorktreeManager {
   private readonly secretValues: () => readonly string[]
   private readonly records = new Map<string, WorktreeRecord>()
   private root: string | undefined
+  private rootTask: Promise<string> | undefined
+  private activeCreates = 0
+  private readonly createIdleWaiters = new Set<() => void>()
   private closed = false
   private closeTask: Promise<void> | undefined
 
@@ -243,15 +247,42 @@ export class WorktreeManager {
     }
   }
 
-  async create(repository: GitRepositoryInfo, name: string): Promise<WorktreeRecord> {
-    if (this.closed) throw new WorktreeError('BRIDGE_CLOSED', 'The MCP bridge is shutting down')
-    if (this.root === undefined) {
-      this.root = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase4-worktrees-'))
+  private async ensureRoot(): Promise<string> {
+    if (this.root !== undefined) return this.root
+    if (this.rootTask === undefined) {
+      this.rootTask = mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase4-worktrees-'))
+        .then((root) => {
+          this.root = root
+          return root
+        })
+        .catch((error) => {
+          this.rootTask = undefined
+          throw error
+        })
     }
+    return this.rootTask
+  }
+  private async waitForCreates(): Promise<void> {
+    if (this.activeCreates === 0) return
+    await new Promise<void>((resolve) => this.createIdleWaiters.add(resolve))
+  }
+  private finishCreate(): void {
+    this.activeCreates -= 1
+    if (this.activeCreates !== 0) return
+    for (const resolve of this.createIdleWaiters) resolve()
+    this.createIdleWaiters.clear()
+  }
 
-    const worktreeId = `dsh-wt-${crypto.randomUUID()}`
+  async create(repository: GitRepositoryInfo, name: string): Promise<WorktreeRecord> {
+    this.activeCreates += 1
+    try {
+    if (this.closed) throw new WorktreeError('BRIDGE_CLOSED', 'The MCP bridge is shutting down')
+    const root = await this.ensureRoot()
+    if (this.closed) throw new WorktreeError('BRIDGE_CLOSED', 'The MCP bridge is shutting down')
+
+    const worktreeId = `dsh-wt-${randomUUID()}`
     const branch = `dsh-mcp/${worktreeId}`
-    const path = join(this.root, worktreeId)
+    const path = join(root, worktreeId)
     try {
       await runGit(
         repository.root,
@@ -259,7 +290,7 @@ export class WorktreeManager {
         this.secretValues(),
       )
       const canonicalPath = await realpath(path)
-      if (!isWithin(this.root, canonicalPath)) {
+      if (!isWithin(root, canonicalPath)) {
         throw new WorktreeError('WORKTREE_CREATE_FAILED', 'Git created a worktree outside the bridge-owned root')
       }
       const record: WorktreeRecord = {
@@ -271,10 +302,17 @@ export class WorktreeManager {
         cleanupState: 'active',
       }
       this.records.set(worktreeId, record)
+      if (this.closed) {
+        await this.cleanup(worktreeId)
+        throw new WorktreeError('BRIDGE_CLOSED', 'The MCP bridge is shutting down')
+      }
       return record
     } catch (error) {
       if (error instanceof WorktreeError) throw error
       throw new WorktreeError('WORKTREE_CREATE_FAILED', 'Git could not create the worker worktree', { cause: error })
+    }
+    } finally {
+      this.finishCreate()
     }
   }
 
@@ -403,6 +441,8 @@ export class WorktreeManager {
     if (this.closeTask !== undefined) return this.closeTask
     this.closed = true
     this.closeTask = (async () => {
+      if (this.rootTask !== undefined) await this.rootTask.catch(() => {})
+      await this.waitForCreates()
       await Promise.all([...this.records.keys()].map((worktreeId) => this.cleanup(worktreeId)))
       if (this.root !== undefined) {
         await rm(this.root, { recursive: false, force: true }).catch(() => {})

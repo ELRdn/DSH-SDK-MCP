@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const [command, rawArgs, auditDirectory, childCwd] = process.argv.slice(2)
@@ -41,7 +41,9 @@ let stdoutRemainder = ''
 let currentTurnStart = null
 
 function writeAudit() {
-  writeFileSync(auditPath, `${JSON.stringify(state)}\n`, 'utf8')
+  const tempAuditPath = `${auditPath}.tmp-${process.pid}`
+  writeFileSync(tempAuditPath, `${JSON.stringify(state)}\n`, 'utf8')
+  renameSync(tempAuditPath, auditPath)
 }
 
 function observeProtocol(message) {

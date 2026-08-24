@@ -1,20 +1,21 @@
-# dsh-sdk-mcp — Phase 3 Parallel Workers
+# dsh-sdk-mcp — Phase 4 Worktree-Isolated Parallel Write
 
-This repository contains the Phase 0 compatibility spike, the hardened Phase 1 MCP stdio bridge, the Phase 2 persistent subagent layer, and the narrowly scoped Phase 3 parallel-worker layer.
+This repository contains the Phase 0 compatibility spike, the hardened Phase 1 MCP stdio bridge, the Phase 2 persistent subagent layer, the Phase 3 parallel-worker layer, and the narrowly scoped Phase 4 Git-worktree layer.
 
-Phase 3 exposes exactly five tools:
+Phase 4 exposes exactly six tools:
 
 - `dsh_health`
 - `dsh_delegate`
 - `dsh_continue`
 - `dsh_status`
 - `dsh_parallel`
+- `dsh_parallel_worktree`
 
 The bridge drives the existing official DSH TypeScript SDK/runtime path. It does not reimplement the DSH agent loop.
 
-Phase 1.1 hardening and Phase 2 lifecycle guarantees remain mandatory. Phase 3 adds only bounded parallel execution in disjoint normalized workspaces; each worker retains an SDK-owned runtime, session, timeout, redaction, and cleanup boundary.
+Phase 1.1 hardening, Phase 2 lifecycle guarantees, and Phase 3's bounded semaphore remain mandatory. Phase 4 adds one high-level worktree workflow: each worker gets a bridge-owned Git worktree, its own SDK runtime/session, and its own Git index/working tree.
 
-The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 3 intentionally uses the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
+The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 4 intentionally uses the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
 
 The spike validates:
 
@@ -25,6 +26,7 @@ The spike validates:
 - same-runtime two-turn reuse
 - one-active-root-run concurrency protection
 - bounded parallel workers with same-workspace rejection
+- same-repository workers with distinct Git worktrees and generated branches
 - Windows read-only filesystem and PowerShell probes
 - runtime stdout purity, bounded stderr diagnostics, and cleanup
 
@@ -90,10 +92,14 @@ The MCP server writes protocol frames to stdout only. Diagnostics go to stderr. 
 
 The aggregate parallel result is bounded to 300,000 serialized characters. Individual `finalResponseLength` values remain the pre-aggregate-bound lengths, while `finalResponseTruncated` and `aggregateResponseTruncated` describe truncation.
 
-The keyless MCP tests use `test/fake-runtime.mjs`, including overlap, cap, workspace collision, partial failure, independent TTL, aggregate bounding, redaction, and shutdown coverage. The real OpenCode Go Phase 3 smoke is opt-in:
+`dsh_parallel_worktree` requires an absolute Git working-tree path and an optional base ref. It validates the Git root/common directory, records `baseRef` and `baseCommit`, creates one generated branch (`dsh-mcp/dsh-wt-*`) and one bridge-owned temporary worktree per task, then runs the existing bounded worker path. Git status and changed-file metadata are collected from Git after execution; model narration is not trusted as Git evidence. The original working tree and branch are not used as worker workspaces.
+
+Bridge-owned worktrees live below a collision-resistant temporary root. Clean worktrees become cleanup-eligible when their runtime/session closes; dirty worktrees are preserved for parent review. The bridge never merges, cherry-picks, resolves conflicts, commits, pushes, creates a PR, or removes an unowned worktree automatically. A worktree is filesystem/Git-index isolation only, not a security sandbox.
+
+The keyless MCP tests use `test/fake-runtime.mjs`, including overlap, cap, workspace collision, partial failure, independent TTL, aggregate bounding, redaction, worktree isolation, clean/dirty cleanup, and shutdown coverage. The real OpenCode Go Phase 4 smoke is opt-in:
 
 ```powershell
-$env:DSH_MCP_PHASE3_REAL_SMOKE = "1"
+$env:DSH_MCP_PHASE4_REAL_SMOKE = "1"
 npx --yes pnpm@11.7.0 test
 ```
 
@@ -129,4 +135,4 @@ Phase 0 Core closes only when Protocol Smoke, Tool Smoke, lifecycle/concurrency,
 
 Sandbox capability remains inconclusive and is not exposed as a security boundary or guarantee. Positive tool text and unchanged sentinels do not produce a `verified-full` result.
 
-Phase 3 intentionally does not include `dsh_cancel`, same-workspace parallelism, Git worktree/merge automation, progress streaming, HTTP transport, MCP v2 migration, Git diff integration, nested DSH orchestration, or dynamic model-selection heuristics. Phase 4 has not started.
+Phase 4 intentionally does not include automatic merging, cherry-picking, conflict resolution, commit generation, push/PR automation, `dsh_cancel`, nested DSH orchestration, progress streaming, HTTP transport, MCP v2 migration, Git diff integration, or security sandbox claims. Phase 5 has not started.

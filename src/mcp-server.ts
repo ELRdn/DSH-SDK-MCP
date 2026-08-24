@@ -43,6 +43,7 @@ import {
 } from './runtime-pool.js'
 import { ParallelSemaphore, ParallelSemaphoreClosedError } from './parallel-semaphore.js'
 import { SessionRegistry } from './session-registry.js'
+import { WorktreeError, WorktreeManager, type GitRepositoryInfo, type WorktreeInspection, type WorktreeRecord } from './worktree-manager.js'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -50,12 +51,14 @@ export const PHASE3_VERSION = '0.3.0-phase3'
 /** Kept as export aliases for earlier host integrations. */
 export const PHASE2_VERSION = PHASE3_VERSION
 export const PHASE1_VERSION = PHASE3_VERSION
+export const PHASE4_VERSION = '0.4.0-phase4'
 export const DEFAULT_DELEGATION_TIMEOUT_MS = 900_000
 export const DEFAULT_HEALTH_TIMEOUT_MS = 30_000
 export const DEFAULT_RUNTIME_IDLE_TTL_MS = 300_000
 export const DEFAULT_MAX_PARALLEL = 3
 export const MAX_PARALLEL_AGGREGATE_RESPONSE_CHARS = 300_000
 export const MAX_DELEGATE_RESPONSE_CHARS = 100_000
+const MIN_RUNTIME_INITIALIZE_TIMEOUT_MS = 2_000
 const HEALTH_PROBE_TASK = 'Reply with exactly DSH_MCP_HEALTH_OK. Do not use any tools or modify files.'
 
 const READINESS_STATES = ['verified', 'unverified', 'unavailable'] as const
@@ -170,6 +173,67 @@ const ParallelOutputSchema = z.object({
   }).optional(),
 })
 
+const WorktreeTaskInputSchema = z.object({
+  task: z.string().min(1).max(200_000),
+  name: z.string().min(1).max(128).optional(),
+}).strict()
+
+const ParallelWorktreeInputSchema = z.object({
+  repo: z.string().min(1).max(4_096),
+  tasks: z.array(WorktreeTaskInputSchema).min(1).max(MAX_PARALLEL_HARD_LIMIT),
+  baseRef: z.string().min(1).max(256).optional(),
+}).strict()
+
+const WorktreeCleanupStateSchema = z.enum([
+  'not_created',
+  'active',
+  'removed',
+  'preserved_dirty',
+  'preserved_error',
+])
+
+const ParallelWorktreeWorkerResultSchema = z.object({
+  index: z.number().int().nonnegative(),
+  name: z.string(),
+  ok: z.boolean(),
+  status: z.enum(['completed', 'error']),
+  sessionId: z.string(),
+  cwd: z.string(),
+  durationMs: z.number().int().nonnegative(),
+  finalResponse: z.string(),
+  finalResponseLength: z.number().int().nonnegative(),
+  finalResponseTruncated: z.boolean(),
+  diagnostics: DelegateDiagnosticsSchema.optional(),
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+  }).optional(),
+  worktreeId: z.string(),
+  worktreePath: z.string(),
+  baseRef: z.string(),
+  baseCommit: z.string(),
+  branch: z.string().optional(),
+  changedFiles: z.array(z.string()),
+  changedFilesTruncated: z.boolean(),
+  gitStatusSummary: z.string(),
+  cleanupState: WorktreeCleanupStateSchema,
+  cleanupError: z.object({ code: z.string(), message: z.string() }).optional(),
+})
+
+const ParallelWorktreeOutputSchema = z.object({
+  ok: z.boolean(),
+  repo: z.string(),
+  baseRef: z.string(),
+  baseCommit: z.string(),
+  results: z.array(ParallelWorktreeWorkerResultSchema),
+  aggregateResponseLength: z.number().int().nonnegative(),
+  aggregateResponseTruncated: z.boolean(),
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+  }).optional(),
+})
+
 export type DshHealthOutput = z.infer<typeof HealthOutputSchema>
 export type DshDelegateInput = z.infer<typeof DelegateInputSchema>
 export type DshDelegateOutput = z.infer<typeof DelegateOutputSchema>
@@ -178,6 +242,8 @@ export type DshStatusInput = z.infer<typeof StatusInputSchema>
 export type DshSessionStatusOutput = z.infer<typeof SessionStatusOutputSchema>
 export type DshParallelInput = z.infer<typeof ParallelInputSchema>
 export type DshParallelOutput = z.infer<typeof ParallelOutputSchema>
+export type DshParallelWorktreeInput = z.infer<typeof ParallelWorktreeInputSchema>
+export type DshParallelWorktreeOutput = z.infer<typeof ParallelWorktreeOutputSchema>
 export type DshParallelWorkerResult = z.infer<typeof ParallelWorkerResultSchema>
 
 type BridgeError = {
@@ -595,6 +661,140 @@ function parallelToolResult(output: DshParallelOutput) {
   }
 }
 
+function worktreeErrorFrom(error: unknown, secretValues: readonly string[] = []): BridgeError {
+  if (error instanceof WorktreeError) {
+    return { code: safeCode(error.code, secretValues), message: boundedSafeMessage(error.message, secretValues) }
+  }
+  return errorFrom(error, secretValues)
+}
+function worktreeBatchError(repo: string, baseRef: string, error: BridgeError, secretValues: readonly string[] = []): DshParallelWorktreeOutput {
+  return {
+    ok: false,
+    repo: redactSecretLike(repo, secretValues),
+    baseRef: redactSecretLike(baseRef, secretValues),
+    baseCommit: '',
+    results: [],
+    aggregateResponseLength: 0,
+    aggregateResponseTruncated: false,
+    error: { code: safeCode(error.code, secretValues), message: boundedSafeMessage(error.message, secretValues) },
+  }
+}
+function emptyWorktreeWorkerResult(index: number, name: string, sessionId: string, repository: GitRepositoryInfo | undefined, error: BridgeError, secretValues: readonly string[] = []): DshParallelWorktreeOutput['results'][number] {
+  return {
+    index,
+    name: redactSecretLike(name, secretValues),
+    ok: false,
+    status: 'error',
+    sessionId: redactSecretLike(sessionId, secretValues),
+    cwd: '',
+    durationMs: 0,
+    finalResponse: '',
+    finalResponseLength: 0,
+    finalResponseTruncated: false,
+    worktreeId: '',
+    worktreePath: '',
+    baseRef: redactSecretLike(repository?.baseRef ?? '', secretValues),
+    baseCommit: redactSecretLike(repository?.baseCommit ?? '', secretValues),
+    changedFiles: [],
+    changedFilesTruncated: false,
+    gitStatusSummary: '',
+    cleanupState: 'not_created',
+    error: { code: safeCode(error.code, secretValues), message: boundedSafeMessage(error.message, secretValues) },
+  }
+}
+function worktreeWorkerResult(index: number, name: string, output: DshDelegateOutput, record: WorktreeRecord, inspection: WorktreeInspection, secretValues: readonly string[] = []): DshParallelWorktreeOutput['results'][number] {
+  return {
+    index,
+    name: redactSecretLike(name, secretValues),
+    ...output,
+    worktreeId: redactSecretLike(record.worktreeId, secretValues),
+    worktreePath: redactSecretLike(record.path, secretValues),
+    baseRef: redactSecretLike(record.repository.baseRef, secretValues),
+    baseCommit: redactSecretLike(record.repository.baseCommit, secretValues),
+    branch: redactSecretLike(record.branch, secretValues),
+    changedFiles: inspection.changedFiles.map((file) => redactSecretLike(file, secretValues)),
+    changedFilesTruncated: inspection.changedFilesTruncated,
+    gitStatusSummary: redactSecretLike(inspection.gitStatusSummary, secretValues),
+    cleanupState: inspection.cleanupState,
+    ...(inspection.cleanupError === undefined ? {} : { cleanupError: inspection.cleanupError }),
+  }
+}
+function boundedWorktreeOutput(repo: string, baseRef: string, baseCommit: string, results: DshParallelWorktreeOutput['results']): DshParallelWorktreeOutput {
+  const build = (items: readonly DshParallelWorktreeOutput['results'][number][], length: number, truncated: boolean) => JSON.stringify({
+    ok: true,
+    repo,
+    baseRef,
+    baseCommit,
+    results: items,
+    aggregateResponseLength: length,
+    aggregateResponseTruncated: truncated,
+  })
+  const aggregateResponseLength = build(results, 0, false).length
+  if (aggregateResponseLength <= MAX_PARALLEL_AGGREGATE_RESPONSE_CHARS) {
+    return { ok: true, repo, baseRef, baseCommit, results, aggregateResponseLength, aggregateResponseTruncated: false }
+  }
+  const bounded = results.map((result) => ({ ...result }))
+  let serialized = build(bounded, aggregateResponseLength, true)
+  let changed = true
+  while (serialized.length > MAX_PARALLEL_AGGREGATE_RESPONSE_CHARS && changed) {
+    const targetIndex = bounded.reduce((bestIndex, result, index) => (
+      bestIndex < 0 || result.finalResponse.length > bounded[bestIndex].finalResponse.length ? index : bestIndex
+    ), -1)
+    if (targetIndex < 0 || bounded[targetIndex].finalResponse.length === 0) break
+    const current = bounded[targetIndex].finalResponse
+    let low = 0
+    let high = current.length
+    let best = -1
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2)
+      const candidate = bounded.map((result, index) => index === targetIndex
+        ? { ...result, finalResponse: `${current.slice(0, middle)}${middle < current.length ? '…' : ''}`, finalResponseTruncated: true }
+        : result)
+      if (build(candidate, aggregateResponseLength, true).length <= MAX_PARALLEL_AGGREGATE_RESPONSE_CHARS) {
+        best = middle
+        low = middle + 1
+      } else {
+        high = middle - 1
+      }
+    }
+    const nextValue = best < 0 ? '' : `${current.slice(0, best)}${best < current.length ? '…' : ''}`
+    changed = nextValue !== current
+    bounded[targetIndex].finalResponse = nextValue
+    bounded[targetIndex].finalResponseTruncated = true
+    serialized = build(bounded, aggregateResponseLength, true)
+  }
+  return { ok: true, repo, baseRef, baseCommit, results: bounded, aggregateResponseLength, aggregateResponseTruncated: true }
+}
+function worktreeToolResult(output: DshParallelWorktreeOutput) {
+  const summary = {
+    ok: output.ok,
+    repo: output.repo,
+    baseRef: output.baseRef,
+    baseCommit: output.baseCommit,
+    results: output.results.map((result) => ({
+      index: result.index,
+      name: result.name,
+      ok: result.ok,
+      status: result.status,
+      sessionId: result.sessionId,
+      worktreeId: result.worktreeId,
+      worktreePath: result.worktreePath,
+      cleanupState: result.cleanupState,
+      changedFileCount: result.changedFiles.length,
+      changedFilesTruncated: result.changedFilesTruncated,
+      ...(result.error === undefined ? {} : { error: result.error }),
+    })),
+    aggregateResponseLength: output.aggregateResponseLength,
+    aggregateResponseTruncated: output.aggregateResponseTruncated,
+    ...(output.error === undefined ? {} : { error: output.error }),
+  }
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(summary) }],
+    structuredContent: output,
+    ...(output.ok ? {} : { isError: true }),
+  }
+}
+
 function hasCredential(environment: NodeJS.ProcessEnv, options: Phase0Options): boolean {
   const references = new Set([options.credentialRef])
   if (options.profile === 'opencode-go') {
@@ -625,6 +825,7 @@ export class Phase1McpBridge {
   private readonly sessions = new SessionRegistry()
   private readonly pool: RuntimePool
   private readonly parallelSemaphore: ParallelSemaphore
+  private readonly worktrees: WorktreeManager
   private activeHarness: DeepSeekHarness | undefined
   private closeTask: Promise<void> | undefined
   private closed = false
@@ -653,13 +854,17 @@ export class Phase1McpBridge {
     this.pool = new RuntimePool({
       idleTtlMs: this.launch?.idleTtlMs ?? DEFAULT_RUNTIME_IDLE_TTL_MS,
       createRuntime: (spec) => this.createRuntime(spec),
-      onRuntimeClosed: (runtime) => {
+      onRuntimeClosed: async (runtime) => {
         this.sessions.expireRuntime(runtime.key)
+        await this.worktrees.onRuntimeClosed(runtime.sessionIds)
       },
     })
     this.parallelSemaphore = new ParallelSemaphore(
       this.launch?.maxParallel ?? DEFAULT_MAX_PARALLEL,
     )
+    this.worktrees = new WorktreeManager({
+      secretValues: () => this.redactionSecrets(),
+    })
   }
 
   private redactionSecrets(): string[] {
@@ -694,7 +899,7 @@ export class Phase1McpBridge {
         launch: {
           ...launch,
           env: childEnvironment,
-          requestTimeoutMs: launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
+          requestTimeoutMs: Math.max(launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS, MIN_RUNTIME_INITIALIZE_TIMEOUT_MS),
         },
         cwd: spec.cwd,
         provider: spec.provider,
@@ -787,10 +992,10 @@ export class Phase1McpBridge {
               launch: {
                 ...launch,
                 env: childEnvironment,
-                requestTimeoutMs: Math.min(
+                requestTimeoutMs: Math.max(Math.min(
                   launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
                   DEFAULT_HEALTH_TIMEOUT_MS,
-                ),
+                ), MIN_RUNTIME_INITIALIZE_TIMEOUT_MS),
               },
               cwd: this.baseDirectory,
               provider: options.provider,
@@ -903,7 +1108,7 @@ export class Phase1McpBridge {
 
     return {
       ok: runtimeReady && providerReady,
-      bridgeVersion: PHASE3_VERSION,
+      bridgeVersion: PHASE4_VERSION,
       nodeVersion: process.version,
       platform: process.platform,
       arch: arch(),
@@ -1238,6 +1443,60 @@ export class Phase1McpBridge {
     return boundedParallelOutput(results)
   }
 
+  async parallelWorktree(input: DshParallelWorktreeInput): Promise<DshParallelWorktreeOutput> {
+    const secretValues = this.redactionSecrets()
+    const requestedBaseRef = input.baseRef?.trim() || 'HEAD'
+    if (this.closed) {
+      return worktreeBatchError(input.repo, requestedBaseRef, { code: 'BRIDGE_CLOSED', message: 'The MCP bridge is shutting down' }, secretValues)
+    }
+    if (this.configError !== undefined || this.options === undefined || this.launch === undefined) {
+      return worktreeBatchError(input.repo, requestedBaseRef, this.configError ?? { code: 'RUNTIME_NOT_CONFIGURED', message: 'DSH runtime is not configured' }, secretValues)
+    }
+    let repository: GitRepositoryInfo
+    try {
+      repository = await this.worktrees.validateRepository(input.repo, requestedBaseRef)
+    } catch (error) {
+      return worktreeBatchError(input.repo, requestedBaseRef, worktreeErrorFrom(error, secretValues), secretValues)
+    }
+    const options = this.options
+    const completed = await Promise.all(input.tasks.map(async (task, index) => {
+      const startedAt = Date.now()
+      const sessionId = `dsh-phase4-${randomUUID()}`
+      const name = task.name?.trim() || `worker-${index}`
+      let record: WorktreeRecord | undefined
+      try {
+        return await this.parallelSemaphore.run(async () => {
+          record = await this.worktrees.create(repository, name)
+          this.worktrees.attachSession(record.worktreeId, sessionId)
+          const output = await this.startSession(
+            runtimeSpecFor(record.path, options.provider, options.model),
+            sessionId,
+            task.task,
+            record.path,
+            startedAt,
+          )
+          if (!output.ok && this.sessions.get(sessionId) === undefined) {
+            await this.worktrees.cleanup(record.worktreeId)
+          }
+          const inspection = await this.worktrees.inspect(record.worktreeId)
+          return worktreeWorkerResult(index, name, output, record, inspection, secretValues)
+        })
+      } catch (error) {
+        if (record !== undefined && this.sessions.get(sessionId) === undefined) {
+          await this.worktrees.cleanup(record.worktreeId).catch(() => {})
+        }
+        const bridgeError = error instanceof ParallelSemaphoreClosedError
+          ? { code: 'BRIDGE_CLOSED', message: 'The MCP bridge is shutting down' }
+          : worktreeErrorFrom(error, secretValues)
+        return emptyWorktreeWorkerResult(index, name, sessionId, repository, bridgeError, secretValues)
+      }
+    }))
+    const repo = redactSecretLike(repository.root, secretValues)
+    const baseRef = redactSecretLike(repository.baseRef, secretValues)
+    const baseCommit = redactSecretLike(repository.baseCommit, secretValues)
+    return boundedWorktreeOutput(repo, baseRef, baseCommit, completed)
+  }
+
   async continue(input: DshContinueInput): Promise<DshDelegateOutput> {
     const startedAt = Date.now()
     const secretValues = this.redactionSecrets()
@@ -1368,8 +1627,9 @@ export class Phase1McpBridge {
         this.pool.close(),
         activeHarness === undefined ? Promise.resolve() : activeHarness.close(),
       ])
+      const worktreeResults = await Promise.allSettled([this.worktrees.close()])
       await this.gate.waitForIdle()
-      const failure = results.find(
+      const failure = [...results, ...worktreeResults].find(
         (result): result is PromiseRejectedResult => result.status === 'rejected',
       )
       if (failure !== undefined && !(failure.reason instanceof RuntimePoolClosedError)) {
@@ -1383,7 +1643,7 @@ export class Phase1McpBridge {
 export function createMcpServer(bridge = new Phase1McpBridge()): McpServer {
   const server = new McpServer({
     name: 'dsh-sdk-mcp-server',
-    version: PHASE3_VERSION,
+    version: PHASE4_VERSION,
   })
 
   server.registerTool(
@@ -1478,6 +1738,23 @@ export function createMcpServer(bridge = new Phase1McpBridge()): McpServer {
       },
     },
     async (input) => parallelToolResult(await bridge.parallel(input)),
+  )
+
+  server.registerTool(
+    'dsh_parallel_worktree',
+    {
+      title: 'Parallel DSH Worktrees',
+      description: 'Create bridge-owned Git worktrees and run bounded independent DSH workers against the same repository without merging or changing the original working tree.',
+      inputSchema: ParallelWorktreeInputSchema,
+      outputSchema: ParallelWorktreeOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => worktreeToolResult(await bridge.parallelWorktree(input)),
   )
 
   return server
