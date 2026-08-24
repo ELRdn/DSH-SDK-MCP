@@ -18,11 +18,20 @@ export interface RuntimeResource {
   dispose: () => Promise<void>
 }
 
+export interface RuntimeSpec {
+  key: string
+  cwd: string
+  provider: string
+  model: string
+}
+
 export interface RuntimeHandle {
   readonly key: string
   readonly cwd: string
   readonly harness: DeepSeekHarness
   readonly initialize: { current: () => InitializeDiagnostic }
+  readonly provider: string
+  readonly model: string
   readonly gate: RuntimeRunGate
   readonly sessionIds: Set<string>
   claimed: boolean
@@ -37,15 +46,15 @@ export interface RuntimeLease {
 
 export interface RuntimePoolOptions {
   idleTtlMs: number
-  createRuntime: (cwd: string) => Promise<RuntimeResource>
+  createRuntime: (spec: RuntimeSpec) => Promise<RuntimeResource>
   onRuntimeClosed?: (runtime: RuntimeHandle) => void
 }
 
 /**
- * Reuses SDK-owned runtimes while keeping execution serial. A pool entry is
- * keyed by the normalized workspace cwd because the SDK records cwd during
- * session creation. Different cwd entries may remain idle, but two root runs
- * are never orchestrated in parallel by this Phase 2 bridge.
+ * Reuses SDK-owned runtimes while keeping each runtime serial. A pool entry is
+ * keyed by workspace plus provider/model route because the SDK records those
+ * values when a runtime is initialized. Distinct entries may run concurrently;
+ * the per-runtime RuntimeRunGate still rejects a second root run.
  */
 export class RuntimePool {
   private readonly idleTtlMs: number
@@ -63,43 +72,42 @@ export class RuntimePool {
     this.onRuntimeClosed = options.onRuntimeClosed
   }
 
-  async acquire(cwd: string): Promise<RuntimeLease> {
+  async acquire(target: RuntimeSpec | string): Promise<RuntimeLease> {
     if (this.closed) throw new RuntimePoolClosedError()
+    const spec = this.normalizeSpec(target)
 
-    const closing = this.closing.get(cwd)
+    const closing = this.closing.get(spec.key)
     if (closing !== undefined) {
       await closing
       if (this.closed) throw new RuntimePoolClosedError()
-      return this.acquire(cwd)
+      return this.acquire(spec)
     }
 
-    const existing = this.runtimes.get(cwd)
+    const existing = this.runtimes.get(spec.key)
     if (existing !== undefined) {
       if (existing.closeTask !== undefined) await existing.closeTask
       if (this.closed) throw new RuntimePoolClosedError()
-      if (existing.closeTask !== undefined) return this.acquire(cwd)
+      if (existing.closeTask !== undefined) return this.acquire(spec)
       if (existing.claimed) return { runtime: existing, owner: false }
       this.clearIdleTimer(existing)
       existing.claimed = true
       return { runtime: existing, owner: true }
     }
 
-    const inFlight = this.pending.get(cwd)
+    const inFlight = this.pending.get(spec.key)
     if (inFlight !== undefined) {
       return { runtime: await inFlight, owner: false }
     }
 
-    if (this.hasClaimedRuntime() || this.hasPendingRuntime() || this.hasClosingRuntime()) {
-      throw new RuntimeBusyError()
-    }
-
     const creation = (async (): Promise<RuntimeHandle> => {
-      const resource = await this.createRuntime(cwd)
+      const resource = await this.createRuntime(spec)
       const runtime: RuntimeHandle = {
-        key: cwd,
-        cwd,
+        key: spec.key,
+        cwd: spec.cwd,
         harness: resource.harness,
         initialize: resource.initialize,
+        provider: spec.provider,
+        model: spec.model,
         gate: new RuntimeRunGate(),
         sessionIds: new Set<string>(),
         claimed: true,
@@ -107,19 +115,19 @@ export class RuntimePool {
         idleTimer: undefined,
       }
       this.resourceMap.set(runtime, resource)
-      this.runtimes.set(cwd, runtime)
+      this.runtimes.set(spec.key, runtime)
       if (this.closed) {
         await this.closeRuntime(runtime)
         throw new RuntimePoolClosedError()
       }
       return runtime
     })()
-    this.pending.set(cwd, creation)
+    this.pending.set(spec.key, creation)
 
     try {
       return { runtime: await creation, owner: true }
     } finally {
-      if (this.pending.get(cwd) === creation) this.pending.delete(cwd)
+      if (this.pending.get(spec.key) === creation) this.pending.delete(spec.key)
     }
   }
 
@@ -214,6 +222,16 @@ export class RuntimePool {
 
   private readonly resourceMap = new WeakMap<RuntimeHandle, RuntimeResource>()
 
+  private normalizeSpec(target: RuntimeSpec | string): RuntimeSpec {
+    if (typeof target !== 'string') return target
+    return {
+      key: target,
+      cwd: target,
+      provider: '',
+      model: '',
+    }
+  }
+
   private async resourceDispose(runtime: RuntimeHandle): Promise<void> {
     const resource = this.resourceMap.get(runtime)
     if (resource !== undefined) {
@@ -223,18 +241,6 @@ export class RuntimePool {
     // The map is populated immediately after creation; this fallback only
     // protects a close race around a factory that resolves a thenable.
     await runtime.harness.close()
-  }
-
-  private hasClaimedRuntime(): boolean {
-    return [...this.runtimes.values()].some((runtime) => runtime.claimed)
-  }
-
-  private hasPendingRuntime(): boolean {
-    return this.pending.size > 0
-  }
-
-  private hasClosingRuntime(): boolean {
-    return this.closing.size > 0
   }
 
   private clearIdleTimer(runtime: RuntimeHandle): void {

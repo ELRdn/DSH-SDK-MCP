@@ -116,13 +116,13 @@ function sendJsonLine(stdin, message) {
   stdin.write(`${JSON.stringify(message)}\n`)
 }
 
-test('MCP tools/list exposes exactly the Phase 2 tools and dsh_health is structured', async () => {
+test('MCP tools/list exposes exactly the Phase 3 tools and dsh_health is structured', async () => {
   const { client, transport } = await connectClient()
   try {
     const listed = await client.listTools()
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
-      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_status'],
+      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_parallel', 'dsh_status'],
     )
 
     const health = await client.callTool({ name: 'dsh_health' })

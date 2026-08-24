@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 
+export const MAX_PARALLEL_HARD_LIMIT = 8
+
 export interface RuntimeLaunchConfig {
   command: string
   args: string[]
@@ -8,6 +10,7 @@ export interface RuntimeLaunchConfig {
   env?: NodeJS.ProcessEnv
   requestTimeoutMs?: number
   idleTtlMs?: number
+  maxParallel?: number
 }
 
 export type RuntimeConfigErrorCode =
@@ -16,6 +19,7 @@ export type RuntimeConfigErrorCode =
   | 'INVALID_RUNTIME_ENV'
   | 'INVALID_RUNTIME_TIMEOUT'
   | 'INVALID_RUNTIME_IDLE_TTL'
+  | 'INVALID_MAX_PARALLEL'
   | 'INVALID_MAX_TOKENS'
   | 'RUNTIME_CONFIG_NOT_FOUND'
   | 'INVALID_PROVIDER_PROFILE'
@@ -121,6 +125,17 @@ export function loadRuntimeLaunchConfig(
     'DSH_MCP_RUNTIME_IDLE_TTL_MS',
     'INVALID_RUNTIME_IDLE_TTL',
   )
+  const maxParallel = parsePositiveInteger(
+    environment.DSH_MCP_MAX_PARALLEL,
+    'DSH_MCP_MAX_PARALLEL',
+    'INVALID_MAX_PARALLEL',
+  )
+  if (maxParallel !== undefined && maxParallel > MAX_PARALLEL_HARD_LIMIT) {
+    throw new RuntimeConfigError(
+      'INVALID_MAX_PARALLEL',
+      `DSH_MCP_MAX_PARALLEL must be at most ${MAX_PARALLEL_HARD_LIMIT}`,
+    )
+  }
 
   if (cordisConfig !== undefined && !existsSync(cordisConfig)) {
     throw new RuntimeConfigError(
@@ -144,7 +159,7 @@ export function loadRuntimeLaunchConfig(
     ? { ...environment, ...childOverrides }
     : undefined
 
-  return { command, args, cwd, env, requestTimeoutMs, idleTtlMs }
+  return { command, args, cwd, env, requestTimeoutMs, idleTtlMs, maxParallel }
 }
 
 export type Phase0ProviderProfile = 'deepseek-official' | 'opencode-go'

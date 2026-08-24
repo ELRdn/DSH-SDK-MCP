@@ -12,7 +12,7 @@ function resource(onDispose) {
   }
 }
 
-test('RuntimePool reuses an idle runtime and never runs two roots in parallel', async () => {
+test('RuntimePool reuses idle runtimes, overlaps distinct runtimes, and guards one runtime', async () => {
   let created = 0
   let disposed = 0
   let active = 0
@@ -34,24 +34,34 @@ test('RuntimePool reuses an idle runtime and never runs two roots in parallel', 
     active -= 1
     return 'first'
   })
+  const sameRuntime = await pool.acquire('/workspace-a')
+  assert.equal(sameRuntime.owner, false)
   await assert.rejects(
-    pool.acquire('/workspace-b'),
+    pool.runExclusive(sameRuntime, async () => 'unreachable'),
     (error) => error instanceof RuntimeBusyError && error.code === 'RUNTIME_BUSY',
   )
+  const secondRuntime = await pool.acquire('/workspace-b')
+  const secondRun = pool.runExclusive(secondRuntime, async () => {
+    active += 1
+    maximumActive = Math.max(maximumActive, active)
+    active -= 1
+    return 'second'
+  })
+  assert.equal(await secondRun, 'second')
   release()
   assert.equal(await firstRun, 'first')
 
-  const second = await pool.acquire('/workspace-a')
-  assert.equal(second.runtime, first.runtime)
-  await pool.runExclusive(second, async () => {
+  const reused = await pool.acquire('/workspace-a')
+  assert.equal(reused.runtime, first.runtime)
+  await pool.runExclusive(reused, async () => {
     active += 1
     maximumActive = Math.max(maximumActive, active)
     active -= 1
   })
   await pool.close()
-  assert.equal(created, 1)
-  assert.equal(disposed, 1)
-  assert.equal(maximumActive, 1)
+  assert.equal(created, 2)
+  assert.equal(disposed, 2)
+  assert.equal(maximumActive, 2)
 })
 
 test('RuntimePool close reaps a runtime that is still being created', async () => {

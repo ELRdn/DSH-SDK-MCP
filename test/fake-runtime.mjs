@@ -1,13 +1,30 @@
-import { existsSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 
 const mode = process.argv[2] ?? 'normal'
 const pidFile = process.env.DSH_PHASE0_FAKE_PID_FILE
+const pidDirectory = process.env.DSH_PHASE3_FAKE_PID_DIR
+const auditDirectory = process.env.DSH_PHASE3_FAKE_AUDIT_DIR
+const pidDirectoryFile = pidDirectory === undefined ? undefined : join(pidDirectory, `${process.pid}.pid`)
+const auditFile = auditDirectory === undefined ? undefined : join(auditDirectory, `${process.pid}.json`)
 
 if (pidFile) writeFileSync(pidFile, `${process.pid}\n`, 'utf8')
+if (pidDirectoryFile) {
+  mkdirSync(pidDirectory, { recursive: true })
+  writeFileSync(pidDirectoryFile, `${process.pid}\n`, 'utf8')
+}
+
+function updateAudit(fields) {
+  if (auditFile === undefined) return
+  let current = {}
+  try { current = JSON.parse(readFileSync(auditFile, 'utf8')) } catch {}
+  writeFileSync(auditFile, `${JSON.stringify({ ...current, pid: process.pid, ...fields })}\n`, 'utf8')
+}
 
 function cleanup() {
   if (pidFile && existsSync(pidFile)) unlinkSync(pidFile)
+  if (pidDirectoryFile && existsSync(pidDirectoryFile)) unlinkSync(pidDirectoryFile)
 }
 
 process.on('exit', cleanup)
@@ -96,6 +113,20 @@ input.on('line', (line) => {
       event(sessionId, { type: 'agent/inbox/spliced', data: { inserted: [{ id: messageId }] } })
       return
     }
+    const requestedContent = request.params.contentBlocks?.[0]?.text ?? ''
+    if (mode === 'parallel-mixed' && requestedContent.includes('TIMEOUT_WORKER')) return
+    if (mode === 'parallel-mixed' && requestedContent.includes('FAIL_WORKER')) {
+      const messageId = `fake-message-${Date.now()}`
+      response(request.id, { messageId })
+      event(sessionId, { type: 'agent/inbox/spliced', data: { inserted: [{ id: messageId }] } })
+      event(sessionId, {
+        type: 'turn/end',
+        data: { turn: 0, reason: { kind: 'error', error: { code: 'QUOTA', message: 'parallel worker quota exhausted' } } },
+      })
+      send({ jsonrpc: '2.0', method: 'session.status', params: { sessionId, status: 'idle' } })
+      return
+    }
+    updateAudit({ startAt: Date.now(), task: requestedContent.slice(0, 80) })
     if (mode === 'prompt-rpc-error') {
       send({
         jsonrpc: '2.0',
@@ -137,13 +168,15 @@ input.on('line', (line) => {
       send({ jsonrpc: '2.0', method: 'session.status', params: { sessionId, status: 'idle' } })
       return
     }
-    const requestedContent = request.params.contentBlocks?.[0]?.text ?? ''
     let content = mode === 'health-no-marker'
       ? 'provider refused the health probe'
       : mode === 'health-superstring'
         ? 'DSH_MCP_HEALTH_OKAY'
         : requestedContent
-    if (mode === 'phase2-context' || mode === 'phase2-context-slow') {
+    if (mode === 'parallel-huge') {
+      content = 'H'.repeat(120_000)
+    }
+    if (mode === 'phase2-context' || mode === 'phase2-context-slow' || mode === 'parallel-context-slow') {
       if (requestedContent === 'Reply with exactly DSH_MCP_HEALTH_OK. Do not use any tools or modify files.') {
         content = 'DSH_MCP_HEALTH_OK'
       } else if (rememberedBySession.has(sessionId)) {
@@ -201,8 +234,17 @@ input.on('line', (line) => {
         method: 'session.status',
         params: { sessionId, status: 'idle' },
       })
+      updateAudit({ endAt: Date.now() })
     }
-    if (mode === 'slow' || mode === 'phase2-context-slow') setTimeout(emitResponse, 300).unref()
+    if (
+      mode === 'slow'
+      || mode === 'phase2-context-slow'
+      || mode === 'parallel-slow'
+      || mode === 'parallel-context-slow'
+    ) {
+      const delayMs = Number(process.env.DSH_PHASE3_FAKE_DELAY_MS) || 300
+      setTimeout(emitResponse, delayMs).unref()
+    }
     else emitResponse()
     return
   }

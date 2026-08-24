@@ -72,6 +72,21 @@ test('runtime idle TTL is parsed as a positive integer and rejects invalid value
   )
 })
 
+test('parallel worker cap is bounded by the hard maximum', () => {
+  const config = loadRuntimeLaunchConfig({
+    DSH_MCP_RUNTIME_COMMAND: 'node',
+    DSH_MCP_MAX_PARALLEL: '2',
+  })
+  assert.equal(config.maxParallel, 2)
+  assert.throws(
+    () => loadRuntimeLaunchConfig({
+      DSH_MCP_RUNTIME_COMMAND: 'node',
+      DSH_MCP_MAX_PARALLEL: '9',
+    }),
+    (error) => error instanceof RuntimeConfigError && error.code === 'INVALID_MAX_PARALLEL',
+  )
+})
+
 test('runtime timeout and max token validation use distinct structured config codes', () => {
   assert.throws(
     () => loadRuntimeLaunchConfig({

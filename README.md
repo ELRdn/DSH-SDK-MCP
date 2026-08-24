@@ -1,19 +1,20 @@
-# dsh-sdk-mcp — Phase 2 Persistent Subagent
+# dsh-sdk-mcp — Phase 3 Parallel Workers
 
-This repository contains the Phase 0 compatibility spike, the hardened Phase 1 MCP stdio bridge, and the narrowly scoped Phase 2 persistent subagent layer.
+This repository contains the Phase 0 compatibility spike, the hardened Phase 1 MCP stdio bridge, the Phase 2 persistent subagent layer, and the narrowly scoped Phase 3 parallel-worker layer.
 
-Phase 2 exposes exactly four tools:
+Phase 3 exposes exactly five tools:
 
 - `dsh_health`
 - `dsh_delegate`
 - `dsh_continue`
 - `dsh_status`
+- `dsh_parallel`
 
 The bridge drives the existing official DSH TypeScript SDK/runtime path. It does not reimplement the DSH agent loop.
 
-Phase 1.1 hardening remains mandatory: runtime startup and active-run shutdown are serialized, stdin EOF/close reaps the bridge and child runtime, and runtime/provider readiness is verified through a short-lived DSH initialize probe. Phase 2 adds only SDK-runtime reuse, stable logical sessions, continuation, coarse status, and idle TTL cleanup.
+Phase 1.1 hardening and Phase 2 lifecycle guarantees remain mandatory. Phase 3 adds only bounded parallel execution in disjoint normalized workspaces; each worker retains an SDK-owned runtime, session, timeout, redaction, and cleanup boundary.
 
-The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 2 intentionally uses the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
+The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 3 intentionally uses the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
 
 The spike validates:
 
@@ -23,6 +24,7 @@ The spike validates:
 - one real filesystem-tool read
 - same-runtime two-turn reuse
 - one-active-root-run concurrency protection
+- bounded parallel workers with same-workspace rejection
 - Windows read-only filesystem and PowerShell probes
 - runtime stdout purity, bounded stderr diagnostics, and cleanup
 
@@ -84,10 +86,14 @@ The MCP server writes protocol frames to stdout only. Diagnostics go to stderr. 
 
 `dsh_delegate` bounds the returned `finalResponse` to 100,000 characters. `finalResponseLength` reports the sanitized pre-truncation length and `finalResponseTruncated` reports whether truncation occurred.
 
-The keyless MCP tests use `test/fake-runtime.mjs`, including same-session context, concurrency, TTL, and shutdown coverage. The real OpenCode Go MCP smoke is opt-in:
+`dsh_parallel` accepts up to eight independent tasks. The default concurrency cap is three and `DSH_MCP_MAX_PARALLEL` can lower or raise it up to the hard maximum of eight. Workers must target disjoint canonical workspaces; absolute-path normalization, Windows case folding, and `realpath` resolution are used before a batch starts. A shared workspace rejects the whole batch with `SHARED_WORKSPACE`. Individual worker failures remain in input order and do not cancel siblings. Successful worker sessions can be continued with `dsh_continue`.
+
+The aggregate parallel result is bounded to 300,000 serialized characters. Individual `finalResponseLength` values remain the pre-aggregate-bound lengths, while `finalResponseTruncated` and `aggregateResponseTruncated` describe truncation.
+
+The keyless MCP tests use `test/fake-runtime.mjs`, including overlap, cap, workspace collision, partial failure, independent TTL, aggregate bounding, redaction, and shutdown coverage. The real OpenCode Go Phase 3 smoke is opt-in:
 
 ```powershell
-$env:DSH_MCP_PHASE2_REAL_SMOKE = "1"
+$env:DSH_MCP_PHASE3_REAL_SMOKE = "1"
 npx --yes pnpm@11.7.0 test
 ```
 
@@ -112,6 +118,7 @@ That mode is not a Phase 0 completion result.
 - When overrides are needed, the implementation merges them over `process.env` so `PATH` is retained.
 - `DSH_MCP_CORDIS_CONFIG` is forwarded to the runtime as `DSH_CORDIS_CONFIG`.
 - `DSH_MCP_RUNTIME_IDLE_TTL_MS` controls how long an idle pooled runtime remains restorable; the default is five minutes.
+- `DSH_MCP_MAX_PARALLEL` controls the bounded parallel-worker semaphore; the default is three and the hard maximum is eight.
 - Reports include secret-like environment variable names only, never values; exact configured credential values are scrubbed from diagnostics and responses.
 - Runtime stdout is audited as newline-delimited JSON-RPC; diagnostics stay on stderr.
 - A `RuntimeRunGate` rejects a second root run on the same runtime with `RUNTIME_BUSY`; it never queues it.
@@ -120,6 +127,6 @@ That mode is not a Phase 0 completion result.
 
 Phase 0 Core closes only when Protocol Smoke, Tool Smoke, lifecycle/concurrency, stdout/stderr, version, cleanup, and orphan-process checks pass on Windows native.
 
-Sandbox capability remains inconclusive and is not exposed as a security boundary or guarantee by Phase 1. Positive tool text and unchanged sentinels do not produce a `verified-full` result.
+Sandbox capability remains inconclusive and is not exposed as a security boundary or guarantee. Positive tool text and unchanged sentinels do not produce a `verified-full` result.
 
-Phase 2 intentionally does not include `dsh_cancel`, parallel runtime orchestration, HTTP transport, progress streaming, Git diff integration, or MCP v2 migration. Sandbox capability remains `inconclusive` and is not a security boundary or guarantee.
+Phase 3 intentionally does not include `dsh_cancel`, same-workspace parallelism, Git worktree/merge automation, progress streaming, HTTP transport, MCP v2 migration, Git diff integration, nested DSH orchestration, or dynamic model-selection heuristics. Phase 4 has not started.

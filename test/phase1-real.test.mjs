@@ -43,7 +43,7 @@ async function waitForProcessesToExit(pids, timeoutMs = 10_000) {
   assert.deepEqual(pids.filter(processAlive), [])
 }
 
-test('opt-in real OpenCode Go Phase 2 smoke', {
+test('opt-in real OpenCode Go persistent session smoke', {
   skip: process.env.DSH_MCP_PHASE1_REAL_SMOKE !== '1'
     && process.env.DSH_MCP_PHASE2_REAL_SMOKE !== '1',
 }, async () => {
@@ -87,7 +87,7 @@ test('opt-in real OpenCode Go Phase 2 smoke', {
     const listed = await client.listTools()
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
-      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_status'],
+      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_parallel', 'dsh_status'],
     )
     const health = await client.callTool({ name: 'dsh_health', arguments: {} })
     assert.equal(health.isError, undefined)
