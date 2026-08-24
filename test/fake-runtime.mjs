@@ -46,6 +46,7 @@ if (
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 let malformedSent = false
+const rememberedBySession = new Map()
 
 input.on('line', (line) => {
   let request
@@ -136,11 +137,22 @@ input.on('line', (line) => {
       send({ jsonrpc: '2.0', method: 'session.status', params: { sessionId, status: 'idle' } })
       return
     }
-    const content = mode === 'health-no-marker'
+    const requestedContent = request.params.contentBlocks?.[0]?.text ?? ''
+    let content = mode === 'health-no-marker'
       ? 'provider refused the health probe'
       : mode === 'health-superstring'
         ? 'DSH_MCP_HEALTH_OKAY'
-      : request.params.contentBlocks?.[0]?.text ?? ''
+        : requestedContent
+    if (mode === 'phase2-context' || mode === 'phase2-context-slow') {
+      if (requestedContent === 'Reply with exactly DSH_MCP_HEALTH_OK. Do not use any tools or modify files.') {
+        content = 'DSH_MCP_HEALTH_OK'
+      } else if (rememberedBySession.has(sessionId)) {
+        content = `REMEMBERED:${rememberedBySession.get(sessionId)}`
+      } else {
+        rememberedBySession.set(sessionId, requestedContent)
+        content = `FIRST_CONTEXT:${requestedContent}`
+      }
+    }
     const messageId = `fake-message-${Date.now()}-${Math.random()}`
     response(request.id, { messageId })
     const emitResponse = () => {
@@ -190,7 +202,7 @@ input.on('line', (line) => {
         params: { sessionId, status: 'idle' },
       })
     }
-    if (mode === 'slow') setTimeout(emitResponse, 300).unref()
+    if (mode === 'slow' || mode === 'phase2-context-slow') setTimeout(emitResponse, 300).unref()
     else emitResponse()
     return
   }

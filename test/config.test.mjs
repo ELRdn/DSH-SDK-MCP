@@ -57,6 +57,21 @@ test('runtime request timeout is parsed as a positive integer', () => {
   assert.equal(config.requestTimeoutMs, 1234)
 })
 
+test('runtime idle TTL is parsed as a positive integer and rejects invalid values', () => {
+  const config = loadRuntimeLaunchConfig({
+    DSH_MCP_RUNTIME_COMMAND: 'node',
+    DSH_MCP_RUNTIME_IDLE_TTL_MS: '4321',
+  })
+  assert.equal(config.idleTtlMs, 4321)
+  assert.throws(
+    () => loadRuntimeLaunchConfig({
+      DSH_MCP_RUNTIME_COMMAND: 'node',
+      DSH_MCP_RUNTIME_IDLE_TTL_MS: '0',
+    }),
+    (error) => error instanceof RuntimeConfigError && error.code === 'INVALID_RUNTIME_IDLE_TTL',
+  )
+})
+
 test('runtime timeout and max token validation use distinct structured config codes', () => {
   assert.throws(
     () => loadRuntimeLaunchConfig({

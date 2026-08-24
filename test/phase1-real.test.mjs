@@ -43,8 +43,9 @@ async function waitForProcessesToExit(pids, timeoutMs = 10_000) {
   assert.deepEqual(pids.filter(processAlive), [])
 }
 
-test('opt-in real OpenCode Go Phase 1 smoke', {
-  skip: process.env.DSH_MCP_PHASE1_REAL_SMOKE !== '1',
+test('opt-in real OpenCode Go Phase 2 smoke', {
+  skip: process.env.DSH_MCP_PHASE1_REAL_SMOKE !== '1'
+    && process.env.DSH_MCP_PHASE2_REAL_SMOKE !== '1',
 }, async () => {
   const auditRoot = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase1-real-audit-'))
   const workspace = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase1-real-workspace-'))
@@ -80,11 +81,14 @@ test('opt-in real OpenCode Go Phase 1 smoke', {
   })
   const stderrChunks = []
   transport.stderr?.on('data', (chunk) => stderrChunks.push(chunk))
-  const client = new Client({ name: 'dsh-sdk-mcp-phase1-real-test', version: '0.1.0' })
+  const client = new Client({ name: 'dsh-sdk-mcp-phase2-real-test', version: '0.2.0' })
   try {
     await client.connect(transport)
     const listed = await client.listTools()
-    assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ['dsh_delegate', 'dsh_health'])
+    assert.deepEqual(
+      listed.tools.map((tool) => tool.name).sort(),
+      ['dsh_continue', 'dsh_delegate', 'dsh_health', 'dsh_status'],
+    )
     const health = await client.callTool({ name: 'dsh_health', arguments: {} })
     assert.equal(health.isError, undefined)
     assert.equal(health.structuredContent.ok, true, JSON.stringify(health))
@@ -108,13 +112,13 @@ test('opt-in real OpenCode Go Phase 1 smoke', {
     const result = await client.callTool({
       name: 'dsh_delegate',
       arguments: {
-        task: 'Reply with exactly: DSH_PHASE1_REAL_OK',
+        task: 'Remember this exact marker: DSH_PHASE2_REAL_OK. Reply with exactly: DSH_PHASE2_REAL_OK',
         cwd: workspace,
       },
     })
     assert.equal(result.isError, undefined, JSON.stringify(result))
     assert.equal(result.structuredContent.ok, true, JSON.stringify(result))
-    assert.match(result.structuredContent.finalResponse, /DSH_PHASE1_REAL_OK/)
+    assert.match(result.structuredContent.finalResponse, /DSH_PHASE2_REAL_OK/)
     assert.ok(result.structuredContent.finalResponse.trim().length > 0)
     assert.equal(result.structuredContent.finalResponseTruncated, false)
     assert.equal(
@@ -123,6 +127,43 @@ test('opt-in real OpenCode Go Phase 1 smoke', {
     )
     for (const secret of secretValues) {
       assert.equal(JSON.stringify(result).includes(secret), false)
+    }
+
+    const status = await client.callTool({
+      name: 'dsh_status',
+      arguments: { sessionId: result.structuredContent.sessionId },
+    })
+    assert.equal(status.isError, undefined)
+    assert.equal(status.structuredContent.status, 'idle')
+
+    const continued = await client.callTool({
+      name: 'dsh_continue',
+      arguments: {
+        sessionId: result.structuredContent.sessionId,
+        task: 'What exact marker did you remember? Reply with exactly: DSH_PHASE2_REAL_OK',
+      },
+    })
+    assert.equal(continued.isError, undefined, JSON.stringify(continued))
+    assert.equal(continued.structuredContent.ok, true, JSON.stringify(continued))
+    assert.equal(continued.structuredContent.sessionId, result.structuredContent.sessionId)
+    assert.match(continued.structuredContent.finalResponse, /DSH_PHASE2_REAL_OK/)
+    assert.ok(continued.structuredContent.finalResponse.trim().length > 0)
+
+    const continuedTwice = await client.callTool({
+      name: 'dsh_continue',
+      arguments: {
+        sessionId: result.structuredContent.sessionId,
+        task: 'Repeat the exact remembered marker once more: DSH_PHASE2_REAL_OK',
+      },
+    })
+    assert.equal(continuedTwice.isError, undefined, JSON.stringify(continuedTwice))
+    assert.equal(continuedTwice.structuredContent.ok, true, JSON.stringify(continuedTwice))
+    assert.equal(continuedTwice.structuredContent.sessionId, result.structuredContent.sessionId)
+    assert.match(continuedTwice.structuredContent.finalResponse, /DSH_PHASE2_REAL_OK/)
+    assert.ok(continuedTwice.structuredContent.finalResponse.trim().length > 0)
+    for (const secret of secretValues) {
+      assert.equal(JSON.stringify(continued).includes(secret), false)
+      assert.equal(JSON.stringify(continuedTwice).includes(secret), false)
     }
   } finally {
     await client.close().catch(() => {})

@@ -1,17 +1,19 @@
-# dsh-sdk-mcp — Phase 1.1 Hardening
+# dsh-sdk-mcp — Phase 2 Persistent Subagent
 
-This repository contains the Phase 0 compatibility spike and the narrowly scoped Phase 1 MCP stdio bridge.
+This repository contains the Phase 0 compatibility spike, the hardened Phase 1 MCP stdio bridge, and the narrowly scoped Phase 2 persistent subagent layer.
 
-Phase 1 exposes exactly two tools:
+Phase 2 exposes exactly four tools:
 
 - `dsh_health`
 - `dsh_delegate`
+- `dsh_continue`
+- `dsh_status`
 
 The bridge drives the existing official DSH TypeScript SDK/runtime path. It does not reimplement the DSH agent loop.
 
-Phase 1.1 hardens the same two-tool surface without adding Phase 2 functionality. Runtime startup and active-run shutdown are serialized, stdin EOF/close reaps the bridge and child runtime, and runtime/provider readiness is verified through a short-lived DSH initialize probe.
+Phase 1.1 hardening remains mandatory: runtime startup and active-run shutdown are serialized, stdin EOF/close reaps the bridge and child runtime, and runtime/provider readiness is verified through a short-lived DSH initialize probe. Phase 2 adds only SDK-runtime reuse, stable logical sessions, continuation, coarse status, and idle TTL cleanup.
 
-The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 1 intentionally uses the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
+The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 2 intentionally uses the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
 
 The spike validates:
 
@@ -76,16 +78,16 @@ npx --yes pnpm@11.7.0 run mcp
 
 The MCP server writes protocol frames to stdout only. Diagnostics go to stderr. Configure the same runtime environment used by the Phase 0 smoke before starting `mcp`.
 
-`dsh_delegate` accepts only a task and an absolute existing `cwd`. It creates one short-lived DSH runtime for the call, rejects a concurrent root delegation with `RUNTIME_BUSY`, and closes the runtime before returning. DSH turn classifications such as `QUOTA`, `MISSING_CREDENTIAL`, and `RATE_LIMITED` are returned as structured MCP tool errors; typed SDK failures distinguish `DSH_INITIALIZE_FAILED`, `DSH_RPC_ERROR`, and an initialized runtime that later dies as `RUNTIME_DIED`. Runtime request timeout is bounded to 15 minutes by default and can be overridden with `DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS`; the health provider probe is independently capped at 30 seconds.
+`dsh_delegate` accepts only a task and an absolute existing `cwd`. It creates a new logical session, reuses an SDK-owned runtime for later turns, rejects a concurrent root delegation with `RUNTIME_BUSY`, and leaves an idle runtime available until its TTL. `dsh_continue` requires the returned stable `sessionId` and sends the next prompt through the same `DeepSeekHarness` session; it never fakes continuity after the runtime expires or dies. `dsh_status` reports only `running`, `idle`, `expired`, or `missing`. DSH turn classifications such as `QUOTA`, `MISSING_CREDENTIAL`, and `RATE_LIMITED` are returned as structured MCP tool errors; typed SDK failures distinguish `DSH_INITIALIZE_FAILED`, `DSH_RPC_ERROR`, and an initialized runtime that later dies as `RUNTIME_DIED`. Runtime request timeout is bounded to 15 minutes by default and can be overridden with `DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS`; the health provider probe is independently capped at 30 seconds.
 
 `dsh_health` distinguishes configuration from verified readiness: `runtimeConfigured`/`providerConfigured` report configuration presence; `runtimeReady` becomes verified after the runtime initialize probe, while `providerReady` becomes verified only after an exact `DSH_MCP_HEALTH_OK` provider turn. A provider quota/timeout can therefore leave `runtimeReady: true` and `providerReady: false`. Credential values are never included in health, tool text, structured content, or stderr-derived diagnostics. The empty `arguments` object may be omitted by MCP clients.
 
 `dsh_delegate` bounds the returned `finalResponse` to 100,000 characters. `finalResponseLength` reports the sanitized pre-truncation length and `finalResponseTruncated` reports whether truncation occurred.
 
-The keyless MCP tests use `test/fake-runtime.mjs`. The real MCP smoke is opt-in:
+The keyless MCP tests use `test/fake-runtime.mjs`, including same-session context, concurrency, TTL, and shutdown coverage. The real OpenCode Go MCP smoke is opt-in:
 
 ```powershell
-$env:DSH_MCP_PHASE1_REAL_SMOKE = "1"
+$env:DSH_MCP_PHASE2_REAL_SMOKE = "1"
 npx --yes pnpm@11.7.0 test
 ```
 
@@ -109,6 +111,7 @@ That mode is not a Phase 0 completion result.
 - If no override is needed, the SDK receives no `env` object and inherits the parent environment verbatim.
 - When overrides are needed, the implementation merges them over `process.env` so `PATH` is retained.
 - `DSH_MCP_CORDIS_CONFIG` is forwarded to the runtime as `DSH_CORDIS_CONFIG`.
+- `DSH_MCP_RUNTIME_IDLE_TTL_MS` controls how long an idle pooled runtime remains restorable; the default is five minutes.
 - Reports include secret-like environment variable names only, never values; exact configured credential values are scrubbed from diagnostics and responses.
 - Runtime stdout is audited as newline-delimited JSON-RPC; diagnostics stay on stderr.
 - A `RuntimeRunGate` rejects a second root run on the same runtime with `RUNTIME_BUSY`; it never queues it.
@@ -119,4 +122,4 @@ Phase 0 Core closes only when Protocol Smoke, Tool Smoke, lifecycle/concurrency,
 
 Sandbox capability remains inconclusive and is not exposed as a security boundary or guarantee by Phase 1. Positive tool text and unchanged sentinels do not produce a `verified-full` result.
 
-Phase 1 intentionally does not include `dsh_continue`, `dsh_status`, `dsh_cancel`, `RuntimePool`, parallel delegation, HTTP transport, progress streaming, or Git diff integration.
+Phase 2 intentionally does not include `dsh_cancel`, parallel runtime orchestration, HTTP transport, progress streaming, Git diff integration, or MCP v2 migration. Sandbox capability remains `inconclusive` and is not a security boundary or guarantee.

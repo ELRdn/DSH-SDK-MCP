@@ -7,6 +7,7 @@ export interface RuntimeLaunchConfig {
   cwd?: string
   env?: NodeJS.ProcessEnv
   requestTimeoutMs?: number
+  idleTtlMs?: number
 }
 
 export type RuntimeConfigErrorCode =
@@ -14,6 +15,7 @@ export type RuntimeConfigErrorCode =
   | 'INVALID_RUNTIME_ARGS'
   | 'INVALID_RUNTIME_ENV'
   | 'INVALID_RUNTIME_TIMEOUT'
+  | 'INVALID_RUNTIME_IDLE_TTL'
   | 'INVALID_MAX_TOKENS'
   | 'RUNTIME_CONFIG_NOT_FOUND'
   | 'INVALID_PROVIDER_PROFILE'
@@ -114,6 +116,11 @@ export function loadRuntimeLaunchConfig(
     'DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS',
     'INVALID_RUNTIME_TIMEOUT',
   )
+  const idleTtlMs = parsePositiveInteger(
+    environment.DSH_MCP_RUNTIME_IDLE_TTL_MS,
+    'DSH_MCP_RUNTIME_IDLE_TTL_MS',
+    'INVALID_RUNTIME_IDLE_TTL',
+  )
 
   if (cordisConfig !== undefined && !existsSync(cordisConfig)) {
     throw new RuntimeConfigError(
@@ -137,7 +144,7 @@ export function loadRuntimeLaunchConfig(
     ? { ...environment, ...childOverrides }
     : undefined
 
-  return { command, args, cwd, env, requestTimeoutMs }
+  return { command, args, cwd, env, requestTimeoutMs, idleTtlMs }
 }
 
 export type Phase0ProviderProfile = 'deepseek-official' | 'opencode-go'

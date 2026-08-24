@@ -32,12 +32,23 @@ import {
 } from './diagnostics.js'
 import { RuntimeBusyError, RuntimeRunGate } from './run-gate.js'
 import { safeError } from './report.js'
+import {
+  RuntimePool,
+  RuntimePoolClosedError,
+  type RuntimeHandle,
+  type RuntimeLease,
+  type RuntimeResource,
+} from './runtime-pool.js'
+import { SessionRegistry } from './session-registry.js'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-export const PHASE1_VERSION = '0.1.0-phase1'
+export const PHASE2_VERSION = '0.2.0-phase2'
+/** Kept as an export alias for Phase 1 host integrations. */
+export const PHASE1_VERSION = PHASE2_VERSION
 export const DEFAULT_DELEGATION_TIMEOUT_MS = 900_000
 export const DEFAULT_HEALTH_TIMEOUT_MS = 30_000
+export const DEFAULT_RUNTIME_IDLE_TTL_MS = 300_000
 export const MAX_DELEGATE_RESPONSE_CHARS = 100_000
 const HEALTH_PROBE_TASK = 'Reply with exactly DSH_MCP_HEALTH_OK. Do not use any tools or modify files.'
 
@@ -70,6 +81,15 @@ const DelegateInputSchema = z.object({
   cwd: z.string().min(1).max(4_096),
 }).strict()
 
+const ContinueInputSchema = z.object({
+  sessionId: z.string().min(1).max(256),
+  task: z.string().min(1).max(200_000),
+}).strict()
+
+const StatusInputSchema = z.object({
+  sessionId: z.string().min(1).max(256),
+}).strict()
+
 const DelegateDiagnosticsSchema = z.object({
   failureClassification: z.string().optional(),
   providerOutcome: z.string().optional(),
@@ -96,9 +116,23 @@ const DelegateOutputSchema = z.object({
   }).optional(),
 })
 
+const SessionStatusOutputSchema = z.object({
+  ok: z.boolean(),
+  status: z.enum(['running', 'idle', 'expired', 'missing']),
+  sessionId: z.string(),
+  cwd: z.string().optional(),
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+  }).optional(),
+})
+
 export type DshHealthOutput = z.infer<typeof HealthOutputSchema>
 export type DshDelegateInput = z.infer<typeof DelegateInputSchema>
 export type DshDelegateOutput = z.infer<typeof DelegateOutputSchema>
+export type DshContinueInput = z.infer<typeof ContinueInputSchema>
+export type DshStatusInput = z.infer<typeof StatusInputSchema>
+export type DshSessionStatusOutput = z.infer<typeof SessionStatusOutputSchema>
 
 type BridgeError = {
   code: string
@@ -175,6 +209,15 @@ const DSH_CLASSIFICATIONS = [
 const DSH_CLASSIFICATION_ALIASES: Record<string, string> = {
   RATE_LIMIT: 'RATE_LIMITED',
 }
+
+const TERMINAL_RUNTIME_CODES = new Set([
+  'BRIDGE_CLOSED',
+  'RUN_TIMEOUT',
+  'RUNTIME_DIED',
+  'RUNTIME_START_FAILED',
+  'DSH_INITIALIZE_FAILED',
+  'RUNTIME_PROTOCOL_ERROR',
+])
 
 function exactClassification(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
@@ -378,6 +421,8 @@ export class Phase1McpBridge {
   private launch: RuntimeLaunchConfig | undefined
   private configError: BridgeError | undefined
   private readonly gate = new RuntimeRunGate()
+  private readonly sessions = new SessionRegistry()
+  private readonly pool: RuntimePool
   private activeHarness: DeepSeekHarness | undefined
   private closeTask: Promise<void> | undefined
   private closed = false
@@ -402,6 +447,14 @@ export class Phase1McpBridge {
         this.options = undefined
       }
     }
+
+    this.pool = new RuntimePool({
+      idleTtlMs: this.launch?.idleTtlMs ?? DEFAULT_RUNTIME_IDLE_TTL_MS,
+      createRuntime: (cwd) => this.createRuntime(cwd),
+      onRuntimeClosed: (runtime) => {
+        this.sessions.expireRuntime(runtime.key)
+      },
+    })
   }
 
   private redactionSecrets(): string[] {
@@ -413,6 +466,64 @@ export class Phase1McpBridge {
 
   redactionSecretsForDiagnostics(): readonly string[] {
     return this.redactionSecrets()
+  }
+
+  private async createRuntime(cwd: string): Promise<RuntimeResource> {
+    const options = this.options
+    const launch = this.launch
+    const secretValues = this.redactionSecrets()
+    if (options === undefined || launch === undefined) {
+      throw new Phase1InputError('RUNTIME_NOT_CONFIGURED', 'DSH runtime is not configured')
+    }
+
+    const sessionRoot = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase2-'))
+    let harness: DeepSeekHarness | undefined
+    try {
+      if (this.closed) throw new Phase1InputError('BRIDGE_CLOSED', 'The MCP bridge is shutting down')
+      const childEnvironment = {
+        ...(launch.env ?? process.env),
+        DSH_CWD: cwd,
+        DSH_SESSION_ROOT: sessionRoot,
+      }
+      harness = new DeepSeekHarness({
+        launch: {
+          ...launch,
+          env: childEnvironment,
+          requestTimeoutMs: launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
+        },
+        cwd,
+        provider: options.provider,
+        model: options.model,
+        maxTokens: options.maxTokens,
+      })
+      const initialize = observeInitialize(harness, secretValues)
+      let disposed = false
+      return {
+        harness,
+        initialize,
+        dispose: async () => {
+          if (disposed) return
+          disposed = true
+          let cleanupError: unknown
+          try {
+            await harness?.close()
+          } catch (error) {
+            cleanupError = error
+          } finally {
+            try {
+              await rm(sessionRoot, { recursive: true, force: true })
+            } catch (error) {
+              cleanupError ??= error
+            }
+          }
+          if (cleanupError !== undefined) throw cleanupError
+        },
+      }
+    } catch (error) {
+      if (harness !== undefined) await harness.close().catch(() => {})
+      await rm(sessionRoot, { recursive: true, force: true }).catch(() => {})
+      throw error
+    }
   }
 
   async health(): Promise<DshHealthOutput> {
@@ -587,7 +698,7 @@ export class Phase1McpBridge {
 
     return {
       ok: runtimeReady && providerReady,
-      bridgeVersion: PHASE1_VERSION,
+      bridgeVersion: PHASE2_VERSION,
       nodeVersion: process.version,
       platform: process.platform,
       arch: arch(),
@@ -604,9 +715,133 @@ export class Phase1McpBridge {
     }
   }
 
+  private async executeSession(
+    runtime: RuntimeHandle,
+    task: string,
+    sessionId: string,
+    cwd: string,
+    startedAt: number,
+  ): Promise<{ output: DshDelegateOutput; terminal: boolean }> {
+    const secretValues = this.redactionSecrets()
+    const options = this.options as Phase0Options
+    const requestTimeoutMs = this.launch?.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS
+
+    try {
+      const runResult: RunResult = await withDeadline(
+        runtime.harness.session(sessionId).run(task),
+        requestTimeoutMs,
+        'DSH delegation',
+      )
+      const diagnostic = summarizeRunResult(runResult, {
+        provider: options.provider,
+        model: options.model,
+        initialize: runtime.initialize.current(),
+        secretValues,
+      })
+      const diagnostics = diagnosticOutput(diagnostic)
+      const response = boundedResponse(runResult.finalResponse, secretValues)
+
+      if (diagnostic.failureClassification !== undefined) {
+        const failureClassification = exactClassification(diagnostic.failureClassification)
+          ?? diagnostic.failureClassification
+        const reason = diagnostic.turnEndReasons.find((item) => item.errorMessage !== undefined)
+        return {
+          terminal: false,
+          output: {
+            ok: false,
+            status: 'error',
+            sessionId,
+            cwd: redactSecretLike(cwd, secretValues),
+            durationMs: Math.max(0, Date.now() - startedAt),
+            finalResponse: response.value,
+            finalResponseLength: response.length,
+            finalResponseTruncated: response.truncated,
+            diagnostics,
+            error: {
+              code: safeCode(failureClassification, secretValues),
+              message: boundedSafeMessage(
+                reason?.errorMessage ?? `DSH turn failed with ${failureClassification}`,
+                secretValues,
+              ),
+            },
+          },
+        }
+      }
+
+      return {
+        terminal: false,
+        output: {
+          ok: true,
+          status: 'completed',
+          sessionId,
+          cwd: redactSecretLike(cwd, secretValues),
+          durationMs: Math.max(0, Date.now() - startedAt),
+          finalResponse: response.value,
+          finalResponseLength: response.length,
+          finalResponseTruncated: response.truncated,
+          diagnostics,
+        },
+      }
+    } catch (error) {
+      const bridgeError = classifyThrownError(
+        error,
+        runtime.initialize.current(),
+        secretValues,
+        this.closed,
+      )
+      return {
+        terminal: TERMINAL_RUNTIME_CODES.has(bridgeError.code),
+        output: delegateErrorResult(sessionId, cwd, startedAt, bridgeError, secretValues),
+      }
+    }
+  }
+
+  private async runSession(
+    lease: RuntimeLease,
+    sessionId: string,
+    task: string,
+    cwd: string,
+    startedAt: number,
+  ): Promise<DshDelegateOutput> {
+    const secretValues = this.redactionSecrets()
+    let execution: { output: DshDelegateOutput; terminal: boolean }
+    try {
+      execution = await this.pool.runExclusive(lease, async (runtime) => {
+        this.sessions.markRunning(sessionId)
+        const result = await this.executeSession(runtime, task, sessionId, cwd, startedAt)
+        if (!result.terminal) this.sessions.markIdle(sessionId)
+        return result
+      })
+    } catch (error) {
+      const bridgeError = error instanceof RuntimePoolClosedError
+        ? { code: 'BRIDGE_CLOSED', message: 'The MCP bridge is shutting down' }
+        : classifyThrownError(error, lease.runtime.initialize.current(), secretValues, this.closed)
+      if (bridgeError.code !== 'RUNTIME_BUSY') this.sessions.markExpired(sessionId)
+      return delegateErrorResult(sessionId, cwd, startedAt, bridgeError, secretValues)
+    }
+
+    if (execution.terminal) {
+      try {
+        await this.pool.closeRuntime(lease.runtime)
+      } catch (error) {
+        return delegateErrorResult(
+          sessionId,
+          cwd,
+          startedAt,
+          {
+            code: 'RUNTIME_CLEANUP_FAILED',
+            message: boundedSafeMessage(safeError(error, secretValues).message, secretValues),
+          },
+          secretValues,
+        )
+      }
+    }
+    return execution.output
+  }
+
   async delegate(input: DshDelegateInput): Promise<DshDelegateOutput> {
     const startedAt = Date.now()
-    const sessionId = `dsh-phase1-${randomUUID()}`
+    const sessionId = `dsh-phase2-${randomUUID()}`
     const secretValues = this.redactionSecrets()
     const requestedCwd = redactSecretLike(input.cwd, secretValues)
 
@@ -646,138 +881,15 @@ export class Phase1McpBridge {
       )
     }
 
-    let result: DshDelegateOutput
     try {
-      result = await this.gate.runExclusive(async () => {
-        const options = this.options as Phase0Options
-        const launch = this.launch as RuntimeLaunchConfig
-        const requestTimeoutMs = launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS
-        let sessionRoot: string | undefined
-        let harness: DeepSeekHarness | undefined
-        let initialize: { current: () => InitializeDiagnostic } = {
-          current: () => ({ success: false }),
-        }
-        let output: DshDelegateOutput
-        let cleanupError: BridgeError | undefined
-
-        try {
-          if (this.closed) {
-            throw new Phase1InputError('BRIDGE_CLOSED', 'The MCP bridge is shutting down')
-          }
-          sessionRoot = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase1-'))
-          if (this.closed) {
-            throw new Phase1InputError('BRIDGE_CLOSED', 'The MCP bridge is shutting down')
-          }
-          const childEnvironment = {
-            ...(launch.env ?? process.env),
-            DSH_CWD: cwd,
-            DSH_SESSION_ROOT: sessionRoot,
-          }
-          harness = new DeepSeekHarness({
-            launch: {
-              ...launch,
-              env: childEnvironment,
-              requestTimeoutMs,
-            },
-            cwd,
-            provider: options.provider,
-            model: options.model,
-            maxTokens: options.maxTokens,
-          })
-          this.activeHarness = harness
-          initialize = observeInitialize(harness, secretValues)
-
-          const runResult: RunResult = await withDeadline(
-            harness.run(input.task, { sessionId }),
-            requestTimeoutMs,
-            'DSH delegation',
-          )
-          const diagnostic = summarizeRunResult(runResult, {
-            provider: options.provider,
-            model: options.model,
-            initialize: initialize.current(),
-            secretValues,
-          })
-          const diagnostics = diagnosticOutput(diagnostic)
-          const response = boundedResponse(runResult.finalResponse, secretValues)
-
-          if (diagnostic.failureClassification !== undefined) {
-            const failureClassification = exactClassification(diagnostic.failureClassification)
-              ?? diagnostic.failureClassification
-            const reason = diagnostic.turnEndReasons.find((item) => item.errorMessage !== undefined)
-            output = {
-              ok: false,
-              status: 'error',
-              sessionId,
-              cwd: redactSecretLike(cwd, secretValues),
-              durationMs: Math.max(0, Date.now() - startedAt),
-              finalResponse: response.value,
-              finalResponseLength: response.length,
-              finalResponseTruncated: response.truncated,
-              diagnostics,
-              error: {
-                code: safeCode(failureClassification, secretValues),
-                message: boundedSafeMessage(
-                  reason?.errorMessage ?? `DSH turn failed with ${failureClassification}`,
-                  secretValues,
-                ),
-              },
-            }
-          } else {
-            output = {
-              ok: true,
-              status: 'completed',
-              sessionId,
-              cwd: redactSecretLike(cwd, secretValues),
-              durationMs: Math.max(0, Date.now() - startedAt),
-              finalResponse: response.value,
-              finalResponseLength: response.length,
-              finalResponseTruncated: response.truncated,
-              diagnostics,
-            }
-          }
-        } catch (error) {
-          output = delegateErrorResult(
-            sessionId,
-            cwd,
-            startedAt,
-            classifyThrownError(error, initialize.current(), secretValues, this.closed),
-            secretValues,
-          )
-        } finally {
-          if (harness !== undefined) {
-            try {
-              await harness.close()
-            } catch (error) {
-              cleanupError = {
-                code: 'RUNTIME_CLEANUP_FAILED',
-                message: boundedSafeMessage(
-                  safeError(error, secretValues).message,
-                  secretValues,
-                ),
-              }
-            }
-          }
-          if (this.activeHarness === harness) this.activeHarness = undefined
-          if (sessionRoot !== undefined) {
-            try {
-              await rm(sessionRoot, { recursive: true, force: true })
-            } catch (error) {
-              cleanupError ??= {
-                code: 'TEMP_CLEANUP_FAILED',
-                message: boundedSafeMessage(safeError(error, secretValues).message, secretValues),
-              }
-            }
-          }
-        }
-
-        if (cleanupError !== undefined) {
-          return delegateErrorResult(sessionId, cwd, startedAt, cleanupError, secretValues)
-        }
-        return output
+      return await this.gate.runExclusive(async () => {
+        const lease = await this.pool.acquire(cwd)
+        this.sessions.create(sessionId, lease.runtime.key, cwd)
+        this.pool.attachSession(lease, sessionId)
+        return this.runSession(lease, sessionId, input.task, cwd, startedAt)
       })
     } catch (error) {
-      result = delegateErrorResult(
+      return delegateErrorResult(
         sessionId,
         cwd,
         startedAt,
@@ -785,7 +897,126 @@ export class Phase1McpBridge {
         secretValues,
       )
     }
-    return result
+  }
+
+  async continue(input: DshContinueInput): Promise<DshDelegateOutput> {
+    const startedAt = Date.now()
+    const secretValues = this.redactionSecrets()
+    const requestedSessionId = redactSecretLike(input.sessionId, secretValues)
+    const record = this.sessions.get(input.sessionId)
+
+    if (record === undefined) {
+      return delegateErrorResult(
+        requestedSessionId,
+        '',
+        startedAt,
+        { code: 'SESSION_NOT_FOUND', message: 'The requested DSH session does not exist' },
+        secretValues,
+      )
+    }
+    if (record.state === 'expired') {
+      return delegateErrorResult(
+        record.sessionId,
+        record.cwd,
+        startedAt,
+        { code: 'SESSION_NOT_ACTIVE', message: 'The requested DSH session is no longer active' },
+        secretValues,
+      )
+    }
+    if (record.state === 'running') {
+      return delegateErrorResult(
+        record.sessionId,
+        record.cwd,
+        startedAt,
+        { code: 'RUNTIME_BUSY', message: 'The DSH runtime already has an active delegation' },
+        secretValues,
+      )
+    }
+    if (this.closed) {
+      return delegateErrorResult(
+        record.sessionId,
+        record.cwd,
+        startedAt,
+        { code: 'BRIDGE_CLOSED', message: 'The MCP bridge is shutting down' },
+        secretValues,
+      )
+    }
+
+    try {
+      const details = await stat(record.cwd)
+      if (!details.isDirectory()) throw new Error('not a directory')
+    } catch {
+      this.sessions.markExpired(record.sessionId)
+      return delegateErrorResult(
+        record.sessionId,
+        record.cwd,
+        startedAt,
+        { code: 'INVALID_CWD', message: 'The session workspace no longer exists or is not accessible' },
+        secretValues,
+      )
+    }
+
+    try {
+      return await this.gate.runExclusive(async () => {
+        const current = this.sessions.get(record.sessionId)
+        if (current === undefined || current.state === 'expired') {
+          throw new Phase1InputError(
+            'SESSION_NOT_ACTIVE',
+            'The requested DSH session is no longer active',
+          )
+        }
+        if (current.state === 'running') throw new RuntimeBusyError()
+        const lease = this.pool.acquireExisting(current.runtimeKey)
+        if (lease === undefined) {
+          this.sessions.markExpired(current.sessionId)
+          throw new Phase1InputError(
+            'SESSION_NOT_ACTIVE',
+            'The requested DSH session is no longer restorable',
+          )
+        }
+        return this.runSession(lease, current.sessionId, input.task, current.cwd, startedAt)
+      })
+    } catch (error) {
+      return delegateErrorResult(
+        record.sessionId,
+        record.cwd,
+        startedAt,
+        classifyThrownError(error, { success: true }, secretValues, this.closed),
+        secretValues,
+      )
+    }
+  }
+
+  async status(input: DshStatusInput): Promise<DshSessionStatusOutput> {
+    const secretValues = this.redactionSecrets()
+    let snapshot = this.sessions.status(input.sessionId)
+    if (snapshot.status === 'idle'
+      && snapshot.runtimeKey !== undefined
+      && !this.pool.hasRuntime(snapshot.runtimeKey)) {
+      this.sessions.markExpired(input.sessionId)
+      snapshot = this.sessions.status(input.sessionId)
+    }
+
+    const output: DshSessionStatusOutput = {
+      ok: snapshot.status === 'running' || snapshot.status === 'idle',
+      status: snapshot.status,
+      sessionId: redactSecretLike(snapshot.sessionId, secretValues),
+      ...(snapshot.cwd === undefined
+        ? {}
+        : { cwd: redactSecretLike(snapshot.cwd, secretValues) }),
+    }
+    if (snapshot.status === 'missing') {
+      output.error = {
+        code: 'SESSION_NOT_FOUND',
+        message: 'The requested DSH session does not exist',
+      }
+    } else if (snapshot.status === 'expired') {
+      output.error = {
+        code: 'SESSION_NOT_ACTIVE',
+        message: 'The requested DSH session is no longer active',
+      }
+    }
+    return output
   }
 
   async close(): Promise<void> {
@@ -793,10 +1024,16 @@ export class Phase1McpBridge {
     this.closed = true
     this.closeTask = (async () => {
       const activeHarness = this.activeHarness
-      try {
-        if (activeHarness !== undefined) await activeHarness.close()
-      } finally {
-        await this.gate.waitForIdle()
+      const results = await Promise.allSettled([
+        this.pool.close(),
+        activeHarness === undefined ? Promise.resolve() : activeHarness.close(),
+      ])
+      await this.gate.waitForIdle()
+      const failure = results.find(
+        (result): result is PromiseRejectedResult => result.status === 'rejected',
+      )
+      if (failure !== undefined && !(failure.reason instanceof RuntimePoolClosedError)) {
+        throw failure.reason
       }
     })()
     return this.closeTask
@@ -806,7 +1043,7 @@ export class Phase1McpBridge {
 export function createMcpServer(bridge = new Phase1McpBridge()): McpServer {
   const server = new McpServer({
     name: 'dsh-sdk-mcp-server',
-    version: PHASE1_VERSION,
+    version: PHASE2_VERSION,
   })
 
   server.registerTool(
@@ -842,6 +1079,46 @@ export function createMcpServer(bridge = new Phase1McpBridge()): McpServer {
     },
     async (input) => {
       const output = await bridge.delegate(input)
+      return toolResult(output, !output.ok)
+    },
+  )
+
+  server.registerTool(
+    'dsh_continue',
+    {
+      title: 'Continue DSH Session',
+      description: 'Continue an existing active DSH session by stable sessionId. Returns SESSION_NOT_ACTIVE when the runtime is no longer restorable.',
+      inputSchema: ContinueInputSchema,
+      outputSchema: DelegateOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const output = await bridge.continue(input)
+      return toolResult(output, !output.ok)
+    },
+  )
+
+  server.registerTool(
+    'dsh_status',
+    {
+      title: 'DSH Session Status',
+      description: 'Report only coarse DSH session state: running, idle, expired, or missing.',
+      inputSchema: StatusInputSchema,
+      outputSchema: SessionStatusOutputSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input) => {
+      const output = await bridge.status(input)
       return toolResult(output, !output.ok)
     },
   )
