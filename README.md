@@ -1,146 +1,286 @@
-# dsh-sdk-mcp — Phase 5 Review & Integration Gate
+# dsh-sdk-mcp
 
-This repository contains the Phase 0 compatibility spike, the hardened Phase 1 MCP stdio bridge, the Phase 2 persistent subagent layer, the Phase 3 parallel-worker layer, the Phase 4 Git-worktree layer, and the narrowly scoped Phase 5 review/integration gate.
+Use DeepSeek Harness as a persistent, parallel coding subagent from MCP
+clients.
 
-Phase 5 exposes exactly eight tools:
+'dsh-sdk-mcp' is a release-candidate MCP stdio bridge. It reuses the official
+DeepSeek Harness TypeScript SDK and its JSON-RPC runtime path; it does not
+reimplement the DSH agent loop. The package is intended for local MCP hosts
+such as Codex and Claude Code.
 
-- `dsh_health`
-- `dsh_delegate`
-- `dsh_continue`
-- `dsh_status`
-- `dsh_parallel`
-- `dsh_parallel_worktree`
-- `dsh_worktree_review`
-- `dsh_integrate`
+> Release candidate: '0.6.0-rc.1'. This repository does not publish an npm
+> release as part of the release-candidate checks.
 
-The bridge drives the existing official DSH TypeScript SDK/runtime path. It does not reimplement the DSH agent loop.
+## What it is
 
-Phase 1.1 hardening, Phase 2 lifecycle guarantees, and Phase 3's bounded semaphore remain mandatory. Phase 5 preserves the Phase 4 worktree workflow: each worker gets a bridge-owned Git worktree, its own SDK runtime/session, and its own Git index/working tree.
+The bridge turns MCP tool calls into bounded DSH runtime turns, preserves
+same-session lifecycle, and adds bounded parallel workers, Git worktree
+isolation, review metadata, and a deterministic integration gate. It keeps
+protocol frames on stdout and diagnostics on stderr.
 
-The MCP package/protocol decision is recorded in [COMPATIBILITY.md](COMPATIBILITY.md). Phase 5 intentionally preserves the pinned v1 legacy stdio path and does not migrate to the v2 `serveStdio` API.
+~~~text
+Codex / Claude Code / MCP client
+              |
+              | MCP stdio, protocol 2025-11-25
+              v
+        dsh-sdk-mcp
+              |
+              | official DSH TypeScript SDK / JSON-RPC
+              v
+        DeepSeek Harness
+              |
+        external provider/model
+~~~
 
-The spike validates:
+For parallel repository work, the boundary is intentionally explicit:
 
-- TypeScript → `@deepseek-ai/dsh-sdk-client`
-- explicit external DSH runtime launch via `command`/`args`
-- stdio JSON-RPC protocol behavior
-- one real filesystem-tool read
-- same-runtime two-turn reuse
-- one-active-root-run concurrency protection
-- bounded parallel workers with same-workspace rejection
-- same-repository workers with distinct Git worktrees and generated branches
-- Windows read-only filesystem and PowerShell probes
-- runtime stdout purity, bounded stderr diagnostics, and cleanup
+~~~text
+Parent MCP client
+       |
+       +-- DSH A -- worktree A -- review/integration metadata
+       +-- DSH B -- worktree B -- review/integration metadata
+       +-- DSH C -- worktree C -- review/integration metadata
+~~~
 
-## Install
+## Features
 
-Use native Windows Node.js `>=22.19.0` for the required Windows gate.
+- MCP v1 stdio server with exactly eight public tools.
+- Persistent DSH sessions with a per-runtime single-active-run gate.
+- Bounded parallel workers with a default cap of 3 and hard cap of 8.
+- Git worktree isolation for same-repository parallel writes.
+- Read-only worktree review and a bridge-owned deterministic integration gate.
+- Structured DSH error classifications, timeout handling, secret redaction,
+  bounded responses, stdin-EOF cleanup, and orphan-process checks.
+- 'dsh-sdk-mcp --version' and 'dsh-sdk-mcp doctor [--json]' for distribution
+  diagnostics.
 
-```powershell
-npx --yes pnpm@11.7.0 install --frozen-lockfile --ignore-scripts
-```
+## Runtime distribution policy
 
-`--ignore-scripts` is intentional: unrelated transitive build hooks are not approved; pnpm lockfile and supply-chain policy checks remain enabled.
+The npm package ships the MCP bridge, its production SDK dependencies, the
+CLI, and the two reference Cordis composition files. It **does not bundle or
+install the external DSH JSON-RPC runtime executable**. A caller must provide
+an explicit runtime command and JSON argv array through
+'DSH_MCP_RUNTIME_COMMAND' and 'DSH_MCP_RUNTIME_ARGS'.
 
-The SDK never discovers or bundles a runtime. The reference/demo runtime and the Cordis composition are separate launch dependencies. You may either install a compatible runtime externally or use the pinned `@deepseek-ai/dsh-sdk-jsonrpc-demo` package included for this disposable Phase 0 spike.
+This is deliberate: the bridge does not rely on npm global dependency
+hoisting, a source checkout, or an accidental dev dependency. The release
+package treats the runtime as an external launch dependency. 'doctor' reports
+whether that command is configured and available; it never prints command
+arguments or credential values. The pinned
+'@deepseek-ai/dsh-sdk-jsonrpc-demo@0.1.1-rc.2' package is used by repository
+validation and is not a production dependency of the published bridge.
 
-The Windows launch must use an executable plus an argv array. Do not use shell interpolation or pass a .cmd wrapper as the SDK command. The runner supports two explicit Phase 0 profiles:
+## Requirements
 
-- `deepseek-official` / `deepseek-v4-flash` -> `DEEPSEEK_API_KEY`
-- `opencode-go` / `deepseek-v4-flash` -> `OPENCODE_API_KEY`
+- Node.js '>=22.19.0'.
+- An MCP client that can launch a local stdio server.
+- Git for worktree and integration tools.
+- A separately installed and configured DSH JSON-RPC runtime for real turns.
 
-The OpenCode Go catalog profile is the recommended real-smoke route when the DeepSeek official account is quota-blocked:
+## Installation
 
-```powershell
-$runtimeEntry = (Resolve-Path .\node_modules\@deepseek-ai\dsh-sdk-jsonrpc-demo\lib\bin.js).Path.Replace('\', '/')
-$env:DSH_MCP_RUNTIME_COMMAND = "node"
-$env:DSH_MCP_RUNTIME_ARGS = '["' + $runtimeEntry + '"]'
+Install the release candidate globally with npm or pnpm:
+
+~~~powershell
+npm install --global dsh-sdk-mcp@0.6.0-rc.1
+# or
+pnpm add --global dsh-sdk-mcp@0.6.0-rc.1
+~~~
+
+Verify the installed CLI without starting a runtime:
+
+~~~powershell
+dsh-sdk-mcp --version
+dsh-sdk-mcp doctor
+~~~
+
+Configure an external runtime with an executable plus argv array. The example
+uses placeholders for a separately installed runtime; do not replace them with
+shell-interpolated input or put credentials in the argument array.
+
+~~~powershell
+$env:DSH_MCP_RUNTIME_COMMAND = "C:\Program Files\nodejs\node.exe"
+$env:DSH_MCP_RUNTIME_ARGS = '["C:/path/to/external/dsh-runtime/lib/bin.js"]'
 $env:DSH_MCP_PROFILE = "opencode-go"
 $env:DSH_MCP_PROVIDER = "opencode-go"
 $env:DSH_MCP_MODEL = "deepseek-v4-flash"
-# Supply OPENCODE_API_KEY through the existing secure environment or DSH credentials service.
-```
+# Supply OPENCODE_API_KEY through the secure host environment or credential service.
+dsh-sdk-mcp doctor
+dsh-sdk-mcp
+~~~
 
-The profile selects `runtime/phase0.opencode-go.cordis.yml` unless `DSH_MCP_CORDIS_CONFIG` is explicitly set. The Cordis composition references `OPENCODE_API_KEY` by name only; no secret value belongs in this repository or in reports.
+The default Cordis file is selected from the installed package. Set
+'DSH_MCP_CORDIS_CONFIG' only when the external runtime needs a different
+composition. 'doctor --json' reports configuration presence and command
+availability, not provider readiness; the MCP 'dsh_health' tool performs the
+bounded runtime/provider probe.
 
-`runtime/phase0.cordis.yml` remains the DeepSeek official composition. Its QUOTA result is retained as provider-reachable/quota-blocked diagnostic evidence.
+## MCP client setup
 
-For a native Windows shell with the pinned reference entrypoint, after the dependencies are available:
+### Codex
 
-```cmd
-scripts\phase0-native.cmd
-```
+Register the installed executable as a local stdio server using the MCP
+configuration mechanism available in the Codex host:
 
-The helper requires the credential referenced by the selected profile and does not print secret values.
+~~~json
+{
+  "mcpServers": {
+    "dsh-sdk-mcp": {
+      "command": "dsh-sdk-mcp",
+      "args": []
+    }
+  }
+}
+~~~
 
-## Run
+Keep runtime configuration in the host process environment or its secure
+credential mechanism. Do not put API keys in this JSON file.
 
-```powershell
-npx --yes pnpm@11.7.0 run typecheck
-npx --yes pnpm@11.7.0 test
-npx --yes pnpm@11.7.0 run phase0
-npx --yes pnpm@11.7.0 run mcp
-```
+### Claude Code
 
-The MCP server writes protocol frames to stdout only. Diagnostics go to stderr. Configure the same runtime environment used by the Phase 0 smoke before starting `mcp`.
+Claude Code can register the same installed executable over local stdio:
 
-`dsh_delegate` accepts only a task and an absolute existing `cwd`. It creates a new logical session, reuses an SDK-owned runtime for later turns, rejects a concurrent root delegation with `RUNTIME_BUSY`, and leaves an idle runtime available until its TTL. `dsh_continue` requires the returned stable `sessionId` and sends the next prompt through the same `DeepSeekHarness` session; it never fakes continuity after the runtime expires or dies. `dsh_status` reports only `running`, `idle`, `expired`, or `missing`. DSH turn classifications such as `QUOTA`, `MISSING_CREDENTIAL`, and `RATE_LIMITED` are returned as structured MCP tool errors; typed SDK failures distinguish `DSH_INITIALIZE_FAILED`, `DSH_RPC_ERROR`, and an initialized runtime that later dies as `RUNTIME_DIED`. Runtime request timeout is bounded to 15 minutes by default and can be overridden with `DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS`; the health provider probe is independently capped at 30 seconds.
+~~~powershell
+claude mcp add --transport stdio dsh-sdk-mcp -- dsh-sdk-mcp
+~~~
 
-`dsh_health` distinguishes configuration from verified readiness: `runtimeConfigured`/`providerConfigured` report configuration presence; `runtimeReady` becomes verified after the runtime initialize probe, while `providerReady` becomes verified only after an exact `DSH_MCP_HEALTH_OK` provider turn. A provider quota/timeout can therefore leave `runtimeReady: true` and `providerReady: false`. Credential values are never included in health, tool text, structured content, or stderr-derived diagnostics. The empty `arguments` object may be omitted by MCP clients.
+The command registers the transport. Configure the external runtime and
+credential in the environment used when Claude Code launches the server.
 
-`dsh_delegate` bounds the returned `finalResponse` to 100,000 characters. `finalResponseLength` reports the sanitized pre-truncation length and `finalResponseTruncated` reports whether truncation occurred.
+### Generic MCP configuration
 
-`dsh_parallel` accepts up to eight independent tasks. The default concurrency cap is three and `DSH_MCP_MAX_PARALLEL` can lower or raise it up to the hard maximum of eight. Workers must target disjoint canonical workspaces; absolute-path normalization, Windows case folding, and `realpath` resolution are used before a batch starts. A shared workspace rejects the whole batch with `SHARED_WORKSPACE`. Individual worker failures remain in input order and do not cancel siblings. Successful worker sessions can be continued with `dsh_continue`.
+~~~json
+{
+  "mcpServers": {
+    "dsh-sdk-mcp": {
+      "command": "dsh-sdk-mcp",
+      "args": [],
+      "env": {
+        "DSH_MCP_PROFILE": "opencode-go",
+        "DSH_MCP_PROVIDER": "opencode-go",
+        "DSH_MCP_MODEL": "deepseek-v4-flash"
+      }
+    }
+  }
+}
+~~~
 
-The aggregate parallel result is bounded to 300,000 serialized characters. Individual `finalResponseLength` values remain the pre-aggregate-bound lengths, while `finalResponseTruncated` and `aggregateResponseTruncated` describe truncation.
+Prefer the host's secure credential store or environment injection for
+'OPENCODE_API_KEY'/'DEEPSEEK_API_KEY'; never commit a value into a config file.
 
-`dsh_parallel_worktree` requires an absolute Git working-tree path and an optional base ref. It validates the Git root/common directory, records `baseRef` and `baseCommit`, creates one generated branch (`dsh-mcp/dsh-wt-*`) and one bridge-owned temporary worktree per task, then runs the existing bounded worker path. Git status and changed-file metadata are collected from Git after execution; model narration is not trusted as Git evidence. The original working tree and branch are not used as worker workspaces.
+## Public tools
 
-Bridge-owned worktrees live below a collision-resistant temporary root. Clean worktrees become cleanup-eligible when their runtime/session closes; dirty worktrees are preserved for parent review. A worktree is filesystem/Git-index isolation only, not a security sandbox.
+The release candidate exposes exactly these eight tools:
 
-`dsh_worktree_review` accepts exactly one worker `sessionId` or `worktreeId` and derives repository identity, base/current commit, dirty state, staged/unstaged/untracked counts, changed files, bounded diff statistics, status text, and conflict-marker metadata from Git. It does not trust worker narration. `dsh_integrate` accepts an absolute repository and worker session IDs in deterministic input order. It creates a fresh bridge-owned integration worktree from the verified base commit, creates bounded Git-native snapshots with a temporary index, and cherry-picks those snapshots only inside that integration worktree. It never changes the original branch, HEAD, or index.
+| Tool | Purpose |
+| --- | --- |
+| 'dsh_health' | Report configuration and bounded runtime/provider readiness. |
+| 'dsh_delegate' | Start a new DSH session for one absolute workspace. |
+| 'dsh_continue' | Continue an active session using the same runtime. |
+| 'dsh_status' | Return coarse 'running', 'idle', 'expired', or 'missing' state. |
+| 'dsh_parallel' | Run bounded tasks in distinct existing workspaces. |
+| 'dsh_parallel_worktree' | Create bridge-owned worktrees for parallel repository tasks. |
+| 'dsh_worktree_review' | Derive bounded review metadata from Git state. |
+| 'dsh_integrate' | Apply worker snapshots inside a fresh integration worktree. |
 
-The complete `dsh_integrate` structured result is bounded to 300,000 serialized characters. `responseLength` reports the sanitized pre-truncation size and `responseTruncated` reports whether the bounded response policy reduced summaries or snapshot file lists.
+All delegation 'cwd' values are absolute existing paths. A second active run
+against the same runtime is rejected with a structured 'RUNTIME_BUSY' result.
+Common DSH classifications such as 'QUOTA', 'MISSING_CREDENTIAL', and
+'RATE_LIMITED' remain structured rather than being inferred from a free-form
+model response.
 
-Integration conflicts are returned as structured metadata. Earlier workers are marked applied, the conflicting worker is marked conflict, later workers are marked pending, and the dirty integration worktree is preserved for inspection. There is no automatic conflict resolution, merge into the original checkout, push, PR, or LLM-based Git decision. Ignored and secret-like untracked files are excluded from snapshots; worker worktrees remain preserved. Clean integration worktrees are cleanup-eligible at bridge shutdown, while dirty conflict worktrees are not force-deleted.
+Responses are bounded. A single final response is capped at 100,000
+characters; parallel and integration aggregate responses are capped at
+300,000 characters. Length and truncation fields are part of the structured
+contract.
 
-The keyless MCP tests use `test/fake-runtime.mjs`, including overlap, cap, workspace collision, partial failure, independent TTL, aggregate bounding, redaction, worktree isolation, review metadata, deterministic integration, conflict handling, clean/dirty cleanup, and shutdown coverage. The real OpenCode Go Phase 5 success/conflict smoke is opt-in:
+## Worktrees and integration
 
-```powershell
-$env:DSH_MCP_PHASE5_REAL_SMOKE = "1"
-npx --yes pnpm@11.7.0 test
-```
+'dsh_parallel_worktree' validates a real Git repository, records the base ref
+and commit, and gives each task a distinct bridge-owned linked worktree. Git
+status and changed-file metadata are read from Git after execution. The
+original checkout, branch, HEAD, and index are not used as worker workspaces.
 
-The smoke exercises `tools/list`, `dsh_health`, three real OpenCode Go workers with non-empty responses, `dsh_worktree_review`, A+B success integration, A+C conflict integration, original-tree protection, child JSON-RPC stdout purity, secret-free stderr, and clean shutdown. It exits non-zero until the Windows gate passes.
+Dirty worker or conflict worktrees are preserved for inspection. Clean
+bridge-owned worktrees are eligible for cleanup when their session lifecycle
+ends. There is no automatic merge into the original branch, conflict
+resolution, push, pull request, or commit-generation policy.
 
-For an explicitly non-Windows protocol experiment only:
+## Security model
 
-```powershell
-$env:DSH_MCP_REQUIRE_WINDOWS = "0"
-$env:DSH_MCP_ALLOW_NON_WINDOWS = "1"
-npx --yes pnpm@11.7.0 run phase0
-```
+Credentials are never returned through 'structuredContent', text content,
+stderr-derived diagnostics, or health output. Runtime commands use explicit
+argv execution; stdout is reserved for MCP JSON-RPC and diagnostics go to
+stderr. Runtime startup, active runs, stdin EOF, and shutdown are covered by
+cleanup tests.
 
-That mode is not a Phase 0 completion result.
+Sandbox capability is **inconclusive**. This project makes no verified-full
+sandbox claim. Git worktree isolation prevents ordinary working-tree/index
+collisions; it is not an OS security boundary and does not promise that DSH
+cannot read, write, spawn processes, or access the network outside a worktree.
+See [SECURITY.md](SECURITY.md) for the threat-model limits.
 
-## Environment safety
+## Compatibility
 
-- `DSH_MCP_PROFILE` selects `deepseek-official` or `opencode-go`; `DSH_MCP_PROVIDER`/`DSH_MCP_MODEL` may override the route values.
-- `DSH_MCP_CREDENTIAL_REF` changes only the credential reference name; it never carries the credential value.
-- `DSH_MCP_RUNTIME_ARGS` must be a JSON array of strings.
-- If no override is needed, the SDK receives no `env` object and inherits the parent environment verbatim.
-- When overrides are needed, the implementation merges them over `process.env` so `PATH` is retained.
-- `DSH_MCP_CORDIS_CONFIG` is forwarded to the runtime as `DSH_CORDIS_CONFIG`.
-- `DSH_MCP_RUNTIME_IDLE_TTL_MS` controls how long an idle pooled runtime remains restorable; the default is five minutes.
-- `DSH_MCP_MAX_PARALLEL` controls the bounded parallel-worker semaphore; the default is three and the hard maximum is eight.
-- Reports include secret-like environment variable names only, never values; exact configured credential values are scrubbed from diagnostics and responses.
-- Runtime stdout is audited as newline-delimited JSON-RPC; diagnostics stay on stderr.
-- A `RuntimeRunGate` rejects a second root run on the same runtime with `RUNTIME_BUSY`; it never queues it.
+This release intentionally uses '@modelcontextprotocol/sdk@1.30.0', the v1
+' StdioServerTransport' path, and negotiated protocol revision
+'2025-11-25'. It does not install or migrate to MCP v2's split
+'@modelcontextprotocol/server' package. The exact package, runtime, host, and
+platform matrix is in [COMPATIBILITY.md](COMPATIBILITY.md).
 
-## Phase 5 gate
+Codex and Claude Code are compatible at the common local-stdio/
+'tools/list'/'tools/call' contract level. A live host-specific matrix is not
+claimed by the keyless release checks.
 
-Phase 5 closes only when the review metadata path, deterministic success integration, structured conflict path, original-tree protection, clean/dirty worktree lifecycle, stdout/stderr, secret redaction, and zero-orphan checks pass in keyless tests and the opt-in Windows-native OpenCode Go E2E. Phase 0–4 compatibility remains mandatory.
+## Troubleshooting
 
-Sandbox capability remains inconclusive and is not exposed as a security boundary or guarantee. Positive tool text and unchanged sentinels do not produce a `verified-full` result.
+### 'doctor' says 'needs-configuration'
 
-Phase 5 intentionally does not include merge into the original checkout, automatic conflict resolution, push/PR automation, `dsh_cancel`, nested DSH orchestration, progress streaming, HTTP transport, MCP v2 migration, or security sandbox claims. Phase 6 has not started.
+Set 'DSH_MCP_RUNTIME_COMMAND' and 'DSH_MCP_RUNTIME_ARGS' for the separately
+installed runtime. Configure the profile/provider and credential reference
+without putting the secret value in tool arguments or logs.
+
+### Runtime is configured but 'dsh_health' is not ready
+
+'doctor' checks configuration and command availability only. 'dsh_health'
+distinguishes runtime initialization from provider readiness. Check the
+external runtime, Cordis composition, provider route, and credential service;
+quota and missing-credential failures are returned as structured errors.
+
+### MCP client reports a protocol or tool-list problem
+
+Confirm that the host launches 'dsh-sdk-mcp' directly, that the process uses
+stdout only for JSON-RPC, and that the installed package is the expected
+version. Do not wrap the command in a shell that prints a banner or diagnostic
+to stdout.
+
+## Development and release checks
+
+~~~powershell
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm run build
+pnpm run typecheck
+pnpm test
+pnpm run package:dry-run
+pnpm run package:inspect
+pnpm run package:smoke
+~~~
+
+'package:smoke' packs the repository, installs the tarball into a disposable
+empty directory, and verifies the installed CLI and MCP handshake. It is
+keyless. The real OpenCode Go fresh-install smoke is opt-in and requires
+'DSH_MCP_FRESH_REAL_SMOKE=1' plus an external runtime command, argv array, and
+credential supplied by the caller. CI never receives credentials.
+
+## Roadmap boundary
+
+Phase 0 through Phase 5 are implemented and this release-candidate work
+packages them as '0.6.0-rc.1'. No Phase 7 work is started by this release
+candidate. Cancellation, MCP v2 migration, HTTP transport, progress
+streaming, nested orchestration, and automatic remote/GitHub integration are
+outside this scope.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+

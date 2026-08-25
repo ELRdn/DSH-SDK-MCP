@@ -67,11 +67,35 @@ export interface Phase0Report {
 
 export const MAX_SAFE_ERROR_MESSAGE_CHARS = 400
 
+function versionFromPath(candidate: string): string | null {
+  let directory = dirname(candidate)
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      const metadata = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8')) as { version?: unknown }
+      if (typeof metadata.version === 'string') return metadata.version
+    } catch {
+      // Continue up through pnpm's nested package layout.
+    }
+    const parent = dirname(directory)
+    if (parent === directory) break
+    directory = parent
+  }
+  return null
+}
+
 export function packageVersion(packageName: string): string | null {
   try {
     const metadata = require(`${packageName}/package.json`) as { version?: unknown }
-    return typeof metadata.version === 'string' ? metadata.version : null
+    if (typeof metadata.version === 'string') return metadata.version
+    throw new Error('package metadata has no version')
   } catch {
+    try {
+      const resolvedPackageJson = require.resolve(`${packageName}/package.json`)
+      const resolvedVersion = versionFromPath(resolvedPackageJson)
+      if (resolvedVersion !== null) return resolvedVersion
+    } catch {
+      // Some packages expose neither their root nor package metadata directly.
+    }
     try {
       const directPackageJson = join(process.cwd(), 'node_modules', ...packageName.split('/'), 'package.json')
       const metadata = JSON.parse(readFileSync(directPackageJson, 'utf8')) as { version?: unknown }

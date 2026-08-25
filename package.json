@@ -1,12 +1,39 @@
 {
   "name": "dsh-sdk-mcp",
-  "version": "0.5.0-phase5",
-  "private": true,
-  "description": "SDK-native DeepSeek Harness MCP stdio bridge.",
+  "version": "0.6.0-rc.1",
+  "description": "SDK-native MCP bridge for using DeepSeek Harness as a persistent and parallel coding subagent.",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "bin": {
-    "dsh-sdk-mcp": "./dist/index.js"
+    "dsh-sdk-mcp": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "runtime",
+    "README.md",
+    "COMPATIBILITY.md",
+    "SECURITY.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "deepseek-harness",
+    "dsh",
+    "subagent",
+    "stdio"
+  ],
   "engines": {
     "node": ">=22.19.0"
   },
@@ -14,6 +41,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
+    "package:dry-run": "npm pack --dry-run --json --ignore-scripts",
+    "package:inspect": "node scripts/package-audit.mjs",
+    "package:smoke": "node scripts/fresh-install-smoke.mjs",
+    "prepack": "npm run build",
     "phase0": "npm run build && node dist/phase0.js",
     "mcp": "npm run build && node dist/index.js"
   },

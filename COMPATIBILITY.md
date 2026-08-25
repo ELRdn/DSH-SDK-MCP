@@ -1,41 +1,98 @@
 # Compatibility
 
-## MCP TypeScript SDK audit — Phase 5
+## Release-candidate matrix
 
-The Phase 5 bridge intentionally remains on the v1 monolithic MCP package:
+The following is the local Windows-native verification baseline observed on
+2026-08-25. A version in this table is a pinned dependency or an observed
+validation environment; it is not a promise that every future provider or MCP
+host has been tested.
 
-- pinned package: `@modelcontextprotocol/sdk@1.30.0`
-- schema dependency: `zod@4.4.3`
-- server imports: `@modelcontextprotocol/sdk/server/mcp.js` and `@modelcontextprotocol/sdk/server/stdio.js`
-- serving path: `new McpServer(...)` → `server.connect(new StdioServerTransport())`
-- `serveStdio(() => buildServer())` is not used
-- `@modelcontextprotocol/server@2.0.0` is not installed
+| Area | Version or behavior | Evidence/status |
+| --- | --- | --- |
+| OS | Windows 11 Home, native Windows process | Verified on the release host |
+| Node.js | 'v26.5.1' observed; package engine '>=22.19.0' | CLI/doctor/build path verified |
+| pnpm | '11.7.0' | Frozen-lockfile install policy |
+| Git | '2.55.0.windows.5' | Worktree/integration host baseline |
+| Bridge package | 'dsh-sdk-mcp@0.6.0-rc.1' | Release candidate |
+| DSH client SDK | '@deepseek-ai/dsh-sdk-client@0.1.1-rc.2' | Production dependency |
+| DSH protocol SDK | '@deepseek-ai/dsh-sdk-protocol@0.1.1-rc.2' | Production dependency |
+| DSH reference runtime | '@deepseek-ai/dsh-sdk-jsonrpc-demo@0.1.1-rc.2' | External runtime; validation/dev only, not bundled |
+| MCP TypeScript SDK | '@modelcontextprotocol/sdk@1.30.0' | Production dependency |
+| MCP transport | 'StdioServerTransport' | Verified implementation |
+| MCP protocol | '2025-11-25' | Negotiated by initialize smoke |
+| MCP v2 package | '@modelcontextprotocol/server' | Not installed; migration intentionally out of scope |
+| Provider profile | 'opencode-go' | Real route used by prior opt-in smoke |
+| Model | 'deepseek-v4-flash' | Profile/default and prior opt-in smoke |
+| Sandbox | 'inconclusive' | Never presented as a security boundary |
+| Worktree isolation | Distinct linked worktree/index per worker | Filesystem/Git collision isolation only |
 
-The installed v1 SDK declares these legacy protocol revisions:
+## MCP SDK and protocol decision
 
-```text
-2025-11-25
-2025-06-18
-2025-03-26
-2024-11-05
-2024-10-07
-```
+This release intentionally remains on MCP TypeScript SDK v1:
 
-The live Phase 1 server audit, retained by the Phase 5 implementation, negotiated:
+- Server imports are '@modelcontextprotocol/sdk/server/mcp.js' and
+  '@modelcontextprotocol/sdk/server/stdio.js'.
+- The server is built with 'McpServer' and connected with
+  'new StdioServerTransport()'.
+- The negotiated/supported revision used by the release checks is
+  '2025-11-25'.
+- 'server/discover' is not required by this v1 contract.
+- The v2 split package '@modelcontextprotocol/server' and its
+  'serveStdio(() => buildServer())' API are not used.
 
-```text
-initialize response protocolVersion: 2025-11-25
-server/discover: -32601 Method not found
-```
-
-Therefore this server is a legacy 2025-era MCP server, not a v2/modern `2026-07-28` server. The v2 stable line is the split package [`@modelcontextprotocol/server`](https://github.com/modelcontextprotocol/typescript-sdk/tree/main/packages/server); its modern stdio entry point is `serveStdio(() => buildServer())`. Phase 5 preserves v1 because v2 migration remains explicitly out of scope.
+The v1 choice is deliberate compatibility debt, not an accidental package
+selection. Do not migrate it as part of Phase 6 packaging.
 
 ## Host compatibility
 
-Codex and Claude Code both support local MCP servers over stdio ([Codex MCP/stdio guidance](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), [Claude Code local stdio configuration](https://code.claude.com/docs/en/mcp)). This Phase 5 server uses the common legacy lifecycle and `tools/list` / `tools/call` surface for eight tools (`dsh_health`, `dsh_delegate`, `dsh_continue`, `dsh_status`, `dsh_parallel`, `dsh_parallel_worktree`, `dsh_worktree_review`, `dsh_integrate`), so it does not require v2-only `server/discover`, modern envelopes, HTTP, progress, or subscription features.
+Codex and Claude Code can launch local MCP servers over stdio and use the
+common 'initialize', 'tools/list', and 'tools/call' lifecycle. The bridge's
+public surface is exactly:
 
-Host configuration compatibility is documented, but a live Codex-host and Claude-Code-host matrix run remains outside this Phase 5 acceptance pass. The repository's MCP client integration tests use the same pinned v1 SDK and the live server's legacy handshake. The real Phase 5 E2E uses the same stdio `tools/list` / `tools/call` contract; it does not imply a v2 host requirement.
+~~~text
+dsh_health
+dsh_delegate
+dsh_continue
+dsh_status
+dsh_parallel
+dsh_parallel_worktree
+dsh_worktree_review
+dsh_integrate
+~~~
 
-## Scope boundary
+Therefore the package is protocol-level compatible with both host styles that
+support a local stdio server. This repository does not claim a live
+Codex-host/Claude-Code-host matrix run as part of the keyless release checks;
+host configuration should still be validated in the consuming environment.
 
-Do not infer v2 migration or sandbox guarantees from this compatibility record. Phase 5 includes bounded review metadata and deterministic snapshot/cherry-pick operations only inside a fresh bridge-owned integration worktree; it preserves the Phase 3 disjoint-workspace and Phase 4 worktree behavior. Worktree isolation is not a security sandbox. Merge into the original checkout, automatic conflict resolution, push/PR actions, cancellation, HTTP transport, progress streaming, nested DSH orchestration, and MCP v2 migration remain out of scope. Sandbox status remains `inconclusive`, and Phase 6 has not started.
+## Runtime distribution
+
+The bridge package ships its production SDK adapter, MCP SDK, CLI, and Cordis
+composition files. It does not ship the external DSH JSON-RPC runtime
+executable. The caller must configure:
+
+~~~text
+DSH_MCP_RUNTIME_COMMAND = an executable path/name
+DSH_MCP_RUNTIME_ARGS    = a JSON array of argv strings
+~~~
+
+The bridge never assumes a source checkout, npm global hoisting, or a dev
+dependency is available. 'dsh-sdk-mcp doctor' reports command configuration
+and availability without probing or printing provider secrets. The real DSH
+turn requires the caller's separately managed runtime, Cordis dependencies,
+provider route, and credential.
+
+## Public scope
+
+Phase 6 packages the Phase 0-5 implementation and does not add a ninth tool.
+It does not add 'dsh_cancel', MCP HTTP transport, progress streaming, nested
+workers, automatic merge/conflict resolution, push/PR actions, or MCP v2.
+
+## Security boundary
+
+Sandbox capability remains 'inconclusive'. A successful tool call, an unchanged
+sentinel, a worktree path, or a clean Git status does not prove a full OS
+sandbox. Worktrees separate ordinary repository working trees and indexes;
+they do not prevent DSH tools from accessing other paths, processes, or
+network resources. See [SECURITY.md](SECURITY.md).
+
