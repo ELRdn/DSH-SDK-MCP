@@ -4,9 +4,64 @@
 >
 > Goal: expose a full DeepSeek Harness (DSH) runtime as a reusable MCP subagent for Codex, Claude Code, Cursor, and other MCP clients by driving DSH through its official SDK/JSON-RPC surface rather than through the Web UI or a one-shot headless CLI.
 >
-> Status: design / implementation handoff
+> Status: Phase 0-5 implemented; Phase 6 release candidate approved for 'next'
 >
-> Date: 2026-08-22
+> Last reviewed: 2026-09-05
+
+## Current roadmap checkpoint — 2026-09-05
+
+| Roadmap area | Current state | Release implication |
+| --- | --- | --- |
+| Phase 0 — upstream compatibility | Migrated and validated against DSH/npm release channel '0.1.2-rc.1' and official 'sdk' profile | '0.1.3-alpha.1' is follow-only |
+| Phase 1 — minimal bridge | Implemented | Retain 'dsh_health' and 'dsh_delegate' contract |
+| Phase 2 — persistent runtime | Implemented | Persistent continue/status remains a core differentiator |
+| Phase 3 — hardening | Implemented with sandbox capability still 'inconclusive' | Do not market worktrees as an OS security boundary |
+| Phase 4 — client integrations | Codex exact-artifact host path verified; Claude Code, Cursor, and generic setup examples documented | Claude Code remains unverified for rc.2 |
+| Phase 5 — release quality | Package, CI, audit, smoke, distribution docs, and Codex host evidence exist | Demo media remains post-RC launch work |
+| Phase 6 — RC packaging | '0.6.0-rc.2' approved | Publish under npm 'next', never 'latest' |
+
+Immediate post-RC priorities, based on current competitors, are progress/job
+visibility, an async cancellation design that matches upstream DSH semantics,
+and an isolated MCP v2 migration. These are not mixed into the DSH 0.1.2
+compatibility patch.
+
+### 2026-09-05 ecosystem refresh
+
+- [ZSeven-W/dsh-crew](https://github.com/ZSeven-W/dsh-crew) leads on native
+  host progress UX, async job control, cancel, and multimodal bridging.
+- [Mr-potato-123/dsh-mcp](https://github.com/Mr-potato-123/dsh-mcp) is a small
+  stateless MCP v2 wrapper without this project's persistent-session and Git
+  worktree/integration workflow.
+- [cpj-dev/dsh-plugin-cc](https://github.com/cpj-dev/dsh-plugin-cc) remains a
+  strong Claude Code-specific SDK broker.
+- [tonytanglab/deepseek-harness-relay-mcp](https://github.com/tonytanglab/deepseek-harness-relay-mcp)
+  leads on durable async run control through a running DSH Web host.
+
+The current defensible position is not "first DSH MCP." It is a thin,
+client-agnostic stdio package combining the official SDK, persistent sessions,
+bounded parallelism, bridge-owned worktrees, and deterministic review and
+integration metadata.
+
+### 0.6.0-rc.2 release gate
+
+- [x] Full keyless suite passes on the exact lockfile (108 total, 102 passed,
+      0 failed, 6 explicit real-provider skips).
+- [x] Package dry-run and package audit pass (57 files, 86,009-byte tarball).
+- [x] Fresh isolated tarball install passes (8 tools, protocol-only stdout,
+      clean exit).
+- [x] Real DSH 0.1.2 paths pass: source-tree health/delegate/status/continue and
+      fresh-tarball health/delegate, both with clean shutdown.
+- [x] Codex CLI 0.153.4 completes the fresh-installed exact-artifact path:
+      exactly 8 tools, verified health, delegate, same-session continue,
+      zero delegated tool calls, empty host workspace, and zero orphans.
+- [ ] Claude Code completes its own rc.2 path before being labeled VERIFIED.
+- [x] npm name is currently unclaimed; `0.6.0-rc.2` release notes and the
+      `next`-only Trusted Publishing workflow are prepared locally.
+- [ ] Git tag/release and npm Trusted Publisher configuration are verified at
+      publication time.
+
+The technical decision is **GO for '0.6.0-rc.2' on npm 'next'**. The remaining
+unchecked items are publication-time operations, not runtime release blockers.
 
 ---
 
@@ -327,7 +382,9 @@ The runtime side must:
 3. receive an explicit `cordis.yml`;
 4. expose the provider/model route the MCP bridge requests.
 
-The official upstream reference uses the `dsh-jsonrpc-agent` / `@deepseek-ai/dsh-sdk-jsonrpc-demo` runtime family.
+The current official upstream path uses the same-version `@deepseek-ai/dsh`
+CLI with `--profile sdk`; the older `dsh-jsonrpc-agent` /
+`@deepseek-ai/dsh-sdk-jsonrpc-demo` path is obsolete for DSH 0.1.2.
 
 ## P0 requirement
 

@@ -3,7 +3,8 @@ import { test } from 'node:test'
 
 import { packageVersion } from '../dist/report.js'
 
-test('dependency report resolves pi-ai package versions through its public export map', () => {
-  assert.equal(packageVersion('@deepseek-ai/dsh-llm-pi-ai'), '0.1.1-rc.2')
-  assert.equal(packageVersion('@earendil-works/pi-ai'), '0.82.1')
+test('dependency report resolves the pinned DSH runtime and SDK versions', () => {
+  assert.equal(packageVersion('@deepseek-ai/dsh'), '0.1.2-rc.1')
+  assert.equal(packageVersion('@deepseek-ai/dsh-sdk-client'), '0.1.2-rc.1')
+  assert.equal(packageVersion('@deepseek-ai/dsh-sdk-protocol'), '0.1.2-rc.1')
 })

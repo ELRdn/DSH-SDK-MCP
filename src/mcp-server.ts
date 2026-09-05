@@ -32,7 +32,8 @@ import {
   type RunDiagnostic,
 } from './diagnostics.js'
 import { RuntimeBusyError, RuntimeRunGate } from './run-gate.js'
-import { safeError } from './report.js'
+import { packageVersionFromRoot, safeError } from './report.js'
+import { createDeepSeekHarness } from './sdk-runtime.js'
 import {
   RuntimePool,
   RuntimePoolClosedError,
@@ -53,7 +54,9 @@ export const PHASE3_VERSION = '0.3.0-phase3'
 export const PHASE2_VERSION = PHASE3_VERSION
 export const PHASE1_VERSION = PHASE3_VERSION
 export const PHASE4_VERSION = '0.4.0-phase4'
-export const PHASE5_VERSION = '0.5.0-phase5'
+export const PACKAGE_VERSION = packageVersionFromRoot(projectRoot)
+/** Kept as an export alias for earlier host integrations. */
+export const PHASE5_VERSION = PACKAGE_VERSION
 export const DEFAULT_DELEGATION_TIMEOUT_MS = 900_000
 export const DEFAULT_HEALTH_TIMEOUT_MS = 30_000
 export const DEFAULT_RUNTIME_IDLE_TTL_MS = 300_000
@@ -1199,16 +1202,20 @@ export class Phase1McpBridge {
         DSH_CWD: spec.cwd,
         DSH_SESSION_ROOT: sessionRoot,
       }
-      harness = new DeepSeekHarness({
-        launch: {
-          ...launch,
-          env: childEnvironment,
-          requestTimeoutMs: Math.max(launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS, MIN_RUNTIME_INITIALIZE_TIMEOUT_MS),
-        },
+      harness = createDeepSeekHarness({
+        ...launch,
+        requestTimeoutMs: launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
+      }, {
         cwd: spec.cwd,
         provider: spec.provider,
         model: spec.model,
         maxTokens: options.maxTokens,
+        dshHome: join(sessionRoot, 'dsh-home'),
+        env: childEnvironment,
+        initializeTimeoutMs: Math.max(
+          launch.initializeTimeoutMs ?? MIN_RUNTIME_INITIALIZE_TIMEOUT_MS,
+          MIN_RUNTIME_INITIALIZE_TIMEOUT_MS,
+        ),
       })
       const initialize = observeInitialize(harness, secretValues)
       let disposed = false
@@ -1292,19 +1299,24 @@ export class Phase1McpBridge {
               DSH_CWD: this.baseDirectory,
               DSH_SESSION_ROOT: sessionRoot,
             }
-            harness = new DeepSeekHarness({
-              launch: {
-                ...launch,
-                env: childEnvironment,
-                requestTimeoutMs: Math.max(Math.min(
-                  launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
-                  DEFAULT_HEALTH_TIMEOUT_MS,
-                ), MIN_RUNTIME_INITIALIZE_TIMEOUT_MS),
-              },
+            const healthTimeoutMs = Math.max(Math.min(
+              launch.requestTimeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
+              DEFAULT_HEALTH_TIMEOUT_MS,
+            ), MIN_RUNTIME_INITIALIZE_TIMEOUT_MS)
+            harness = createDeepSeekHarness({
+              ...launch,
+              requestTimeoutMs: healthTimeoutMs,
+            }, {
               cwd: this.baseDirectory,
               provider: options.provider,
               model: options.model,
               maxTokens: options.maxTokens,
+              dshHome: join(sessionRoot, 'dsh-home'),
+              env: childEnvironment,
+              initializeTimeoutMs: Math.max(
+                launch.initializeTimeoutMs ?? MIN_RUNTIME_INITIALIZE_TIMEOUT_MS,
+                MIN_RUNTIME_INITIALIZE_TIMEOUT_MS,
+              ),
             })
             this.activeHarness = harness
             initialize = observeInitialize(harness, secretValues)
@@ -1412,7 +1424,7 @@ export class Phase1McpBridge {
 
     return {
       ok: runtimeReady && providerReady,
-      bridgeVersion: PHASE5_VERSION,
+      bridgeVersion: PACKAGE_VERSION,
       nodeVersion: process.version,
       platform: process.platform,
       arch: arch(),
@@ -2005,7 +2017,7 @@ export class Phase1McpBridge {
 export function createMcpServer(bridge = new Phase1McpBridge()): McpServer {
   const server = new McpServer({
     name: 'dsh-sdk-mcp-server',
-    version: PHASE5_VERSION,
+    version: PACKAGE_VERSION,
   })
 
   server.registerTool(

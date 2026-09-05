@@ -21,9 +21,18 @@ test('runtime args must be a JSON array of strings', () => {
   )
 })
 
-test('missing runtime command is rejected', () => {
+test('missing runtime command selects the bundled DSH sdk profile', () => {
+  const config = loadRuntimeLaunchConfig({})
+  assert.equal(config.command, undefined)
+  assert.equal(config.profile, 'sdk')
+  assert.deepEqual(config.args, [])
+  assert.deepEqual(config.patches, [])
+  assert.equal(config.initializeTimeoutMs, 30_000)
+})
+
+test('runtime args without an external command are rejected', () => {
   assert.throws(
-    () => loadRuntimeLaunchConfig({}),
+    () => loadRuntimeLaunchConfig({ DSH_MCP_RUNTIME_ARGS: '["orphan-arg"]' }),
     (error) => error instanceof RuntimeConfigError && error.code === 'RUNTIME_NOT_CONFIGURED',
   )
 })
@@ -52,8 +61,10 @@ test('runtime request timeout is parsed as a positive integer', () => {
   const config = loadRuntimeLaunchConfig({
     DSH_MCP_RUNTIME_COMMAND: 'node',
     DSH_MCP_RUNTIME_ARGS: '[]',
+    DSH_MCP_RUNTIME_INITIALIZE_TIMEOUT_MS: '4321',
     DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS: '1234',
   })
+  assert.equal(config.initializeTimeoutMs, 4321)
   assert.equal(config.requestTimeoutMs, 1234)
 })
 

@@ -2,13 +2,24 @@ import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 
 export const MAX_PARALLEL_HARD_LIMIT = 8
+export const DEFAULT_RUNTIME_INITIALIZE_TIMEOUT_MS = 30_000
 
 export interface RuntimeLaunchConfig {
-  command: string
+  /** Optional legacy/external JSON-RPC runtime command. Omit for bundled DSH. */
+  command?: string
   args: string[]
+  /** DSH 0.1.2+ CLI launch options used by the official SDK client. */
+  dshBin?: string
+  profile: string
+  patches: string[]
+  dshHome?: string
   cwd?: string
   env?: NodeJS.ProcessEnv
+  initializeTimeoutMs?: number
   requestTimeoutMs?: number
+  shutdownTimeoutMs?: number
+  disposeEofGraceMs?: number
+  disposeGraceMs?: number
   idleTtlMs?: number
   maxParallel?: number
 }
@@ -104,17 +115,30 @@ export function loadRuntimeLaunchConfig(
   baseDirectory = process.cwd(),
 ): RuntimeLaunchConfig {
   const command = environment.DSH_MCP_RUNTIME_COMMAND?.trim()
-  if (!command) {
+  const args = parseStringArray(environment.DSH_MCP_RUNTIME_ARGS, 'DSH_MCP_RUNTIME_ARGS')
+  if (!command && args.length > 0) {
     throw new RuntimeConfigError(
       'RUNTIME_NOT_CONFIGURED',
-      'DSH_MCP_RUNTIME_COMMAND is required for the Phase 0 smoke test',
+      'DSH_MCP_RUNTIME_ARGS requires DSH_MCP_RUNTIME_COMMAND',
     )
   }
 
-  const args = parseStringArray(environment.DSH_MCP_RUNTIME_ARGS, 'DSH_MCP_RUNTIME_ARGS')
   const cwd = resolveOptionalPath(environment.DSH_MCP_RUNTIME_CWD, baseDirectory)
   const cordisConfig = resolveOptionalPath(environment.DSH_MCP_CORDIS_CONFIG, baseDirectory)
+  const configuredPatches = parseStringArray(
+    environment.DSH_MCP_DSH_PATCHES,
+    'DSH_MCP_DSH_PATCHES',
+  ).map((path) => resolveOptionalPath(path, baseDirectory) as string)
+  const patches = [
+    ...(cordisConfig === undefined ? [] : [cordisConfig]),
+    ...configuredPatches,
+  ]
   const overrides = parseEnvironmentOverrides(environment.DSH_MCP_RUNTIME_ENV_JSON)
+  const initializeTimeoutMs = parsePositiveInteger(
+    environment.DSH_MCP_RUNTIME_INITIALIZE_TIMEOUT_MS,
+    'DSH_MCP_RUNTIME_INITIALIZE_TIMEOUT_MS',
+    'INVALID_RUNTIME_TIMEOUT',
+  )
   const requestTimeoutMs = parsePositiveInteger(
     environment.DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS,
     'DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS',
@@ -159,7 +183,20 @@ export function loadRuntimeLaunchConfig(
     ? { ...environment, ...childOverrides }
     : undefined
 
-  return { command, args, cwd, env, requestTimeoutMs, idleTtlMs, maxParallel }
+  return {
+    command,
+    args,
+    dshBin: resolveOptionalPath(environment.DSH_MCP_DSH_BIN, baseDirectory),
+    profile: environment.DSH_MCP_DSH_PROFILE?.trim() || 'sdk',
+    patches,
+    dshHome: resolveOptionalPath(environment.DSH_MCP_DSH_HOME, baseDirectory),
+    cwd,
+    env,
+    initializeTimeoutMs: initializeTimeoutMs ?? DEFAULT_RUNTIME_INITIALIZE_TIMEOUT_MS,
+    requestTimeoutMs,
+    idleTtlMs,
+    maxParallel,
+  }
 }
 
 export type Phase0ProviderProfile = 'deepseek-official' | 'opencode-go'
@@ -270,7 +307,7 @@ export function loadPhase0Options(
     ),
     requireWindows: environment.DSH_MCP_REQUIRE_WINDOWS !== '0',
     runtimePackage: environment.DSH_MCP_RUNTIME_PACKAGE?.trim()
-      || '@deepseek-ai/dsh-sdk-jsonrpc-demo',
+      || '@deepseek-ai/dsh',
     sandboxCordisConfig,
   }
 }

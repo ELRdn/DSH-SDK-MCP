@@ -8,8 +8,9 @@ DeepSeek Harness TypeScript SDK and its JSON-RPC runtime path; it does not
 reimplement the DSH agent loop. The package is intended for local MCP hosts
 such as Codex and Claude Code.
 
-> Release candidate: '0.6.0-rc.1'. This repository does not publish an npm
-> release as part of the release-candidate checks.
+> Release candidate: '0.6.0-rc.2'. The exact-artifact Codex host gate is
+> verified. Publish and install this prerelease through npm's 'next' dist-tag,
+> never 'latest'.
 
 ## What it is
 
@@ -27,7 +28,7 @@ Codex / Claude Code / MCP client
               |
               | official DSH TypeScript SDK / JSON-RPC
               v
-        DeepSeek Harness
+  bundled DeepSeek Harness 'sdk' profile
               |
         external provider/model
 ~~~
@@ -56,35 +57,38 @@ Parent MCP client
 
 ## Runtime distribution policy
 
-The npm package ships the MCP bridge, its production SDK dependencies, the
-CLI, and the two reference Cordis composition files. It **does not bundle or
-install the external DSH JSON-RPC runtime executable**. A caller must provide
-an explicit runtime command and JSON argv array through
-'DSH_MCP_RUNTIME_COMMAND' and 'DSH_MCP_RUNTIME_ARGS'.
+The npm package pins '@deepseek-ai/dsh@0.1.2-rc.1' beside the same-version
+official TypeScript SDK. With no runtime override, the SDK resolves that CLI
+and starts 'dsh --profile sdk' with the selected patch overlay. A separate DSH
+installation or the removed 'dsh-sdk-jsonrpc-demo' package is not required.
 
-This is deliberate: the bridge does not rely on npm global dependency
-hoisting, a source checkout, or an accidental dev dependency. The release
-package treats the runtime as an external launch dependency. 'doctor' reports
-whether that command is configured and available; it never prints command
-arguments or credential values. The pinned
-'@deepseek-ai/dsh-sdk-jsonrpc-demo@0.1.1-rc.2' package is used by repository
-validation and is not a production dependency of the published bridge.
+Each bridge-owned runtime receives a temporary isolated 'DSH_HOME'; closing
+the runtime removes it with the session resource. The older
+'DSH_MCP_RUNTIME_COMMAND' and 'DSH_MCP_RUNTIME_ARGS' interface remains as an
+explicit compatibility override for custom JSON-RPC runtimes. It uses direct
+argv spawning without shell interpolation. 'doctor' reports which mode is
+active and never prints command arguments or credential values.
+
+Cold DSH startup is allowed 30 seconds by default, which is safer for the
+large 0.1.2 package graph on Windows. Override it with
+'DSH_MCP_RUNTIME_INITIALIZE_TIMEOUT_MS' when a host needs a different bound.
 
 ## Requirements
 
 - Node.js '>=22.19.0'.
 - An MCP client that can launch a local stdio server.
 - Git for worktree and integration tools.
-- A separately installed and configured DSH JSON-RPC runtime for real turns.
+- A provider credential supplied through the MCP host environment or DSH
+  credential service for real turns.
 
 ## Installation
 
 Install the release candidate globally with npm or pnpm:
 
 ~~~powershell
-npm install --global dsh-sdk-mcp@0.6.0-rc.1
+npm install --global dsh-sdk-mcp@0.6.0-rc.2
 # or
-pnpm add --global dsh-sdk-mcp@0.6.0-rc.1
+pnpm add --global dsh-sdk-mcp@0.6.0-rc.2
 ~~~
 
 Verify the installed CLI without starting a runtime:
@@ -94,13 +98,10 @@ dsh-sdk-mcp --version
 dsh-sdk-mcp doctor
 ~~~
 
-Configure an external runtime with an executable plus argv array. The example
-uses placeholders for a separately installed runtime; do not replace them with
-shell-interpolated input or put credentials in the argument array.
+Select the provider route. The bundled DSH SDK profile is the default, so no
+runtime command is needed:
 
 ~~~powershell
-$env:DSH_MCP_RUNTIME_COMMAND = "C:\Program Files\nodejs\node.exe"
-$env:DSH_MCP_RUNTIME_ARGS = '["C:/path/to/external/dsh-runtime/lib/bin.js"]'
 $env:DSH_MCP_PROFILE = "opencode-go"
 $env:DSH_MCP_PROVIDER = "opencode-go"
 $env:DSH_MCP_MODEL = "deepseek-v4-flash"
@@ -109,11 +110,12 @@ dsh-sdk-mcp doctor
 dsh-sdk-mcp
 ~~~
 
-The default Cordis file is selected from the installed package. Set
-'DSH_MCP_CORDIS_CONFIG' only when the external runtime needs a different
-composition. 'doctor --json' reports configuration presence and command
-availability, not provider readiness; the MCP 'dsh_health' tool performs the
-bounded runtime/provider probe.
+The default DSH profile patch is selected from the installed package. Set
+'DSH_MCP_CORDIS_CONFIG' only to replace that single patch or use
+'DSH_MCP_DSH_PATCHES' for an additional JSON array of patch paths. Advanced
+installations may set 'DSH_MCP_DSH_BIN', 'DSH_MCP_DSH_PROFILE', or
+'DSH_MCP_DSH_HOME'. 'doctor --json' reports bundled/external runtime presence,
+not provider readiness; 'dsh_health' performs the bounded live probe.
 
 ## MCP client setup
 
@@ -122,19 +124,21 @@ bounded runtime/provider probe.
 Register the installed executable as a local stdio server using the MCP
 configuration mechanism available in the Codex host:
 
-~~~json
-{
-  "mcpServers": {
-    "dsh-sdk-mcp": {
-      "command": "dsh-sdk-mcp",
-      "args": []
-    }
-  }
-}
+~~~toml
+[mcp_servers.dsh-sdk-mcp]
+command = "dsh-sdk-mcp"
+args = []
+env = { DSH_MCP_PROFILE = "opencode-go", DSH_MCP_PROVIDER = "opencode-go", DSH_MCP_MODEL = "deepseek-v4-flash" }
+env_vars = ["OPENCODE_GO_API_KEY"]
+startup_timeout_sec = 120
+tool_timeout_sec = 300
 ~~~
 
-Keep runtime configuration in the host process environment or its secure
-credential mechanism. Do not put API keys in this JSON file.
+Codex does not forward arbitrary host variables into an MCP child process.
+'env_vars' names the credential variable that Codex may inherit without
+putting its value in configuration or command-line arguments. Use
+'OPENCODE_API_KEY' there instead when that is the variable managed by the
+host. Keep all credential values in the host environment or its secure store.
 
 ### Claude Code
 
@@ -144,8 +148,31 @@ Claude Code can register the same installed executable over local stdio:
 claude mcp add --transport stdio dsh-sdk-mcp -- dsh-sdk-mcp
 ~~~
 
-The command registers the transport. Configure the external runtime and
-credential in the environment used when Claude Code launches the server.
+The command registers the transport. Configure the provider credential in the
+environment used when Claude Code launches the server.
+
+### Cursor
+
+Register the same executable in Cursor's MCP JSON settings:
+
+~~~json
+{
+  "mcpServers": {
+    "dsh-sdk-mcp": {
+      "command": "dsh-sdk-mcp",
+      "args": [],
+      "env": {
+        "DSH_MCP_PROFILE": "opencode-go",
+        "DSH_MCP_PROVIDER": "opencode-go",
+        "DSH_MCP_MODEL": "deepseek-v4-flash"
+      }
+    }
+  }
+}
+~~~
+
+Inject the credential through the environment that starts Cursor; do not put
+its value in the settings file.
 
 ### Generic MCP configuration
 
@@ -236,15 +263,15 @@ claimed by the keyless release checks.
 
 ### 'doctor' says 'needs-configuration'
 
-Set 'DSH_MCP_RUNTIME_COMMAND' and 'DSH_MCP_RUNTIME_ARGS' for the separately
-installed runtime. Configure the profile/provider and credential reference
-without putting the secret value in tool arguments or logs.
+The bundled runtime is already available unless 'doctor' says otherwise.
+Configure the selected profile/provider credential without putting the secret
+value in tool arguments or logs.
 
 ### Runtime is configured but 'dsh_health' is not ready
 
-'doctor' checks configuration and command availability only. 'dsh_health'
-distinguishes runtime initialization from provider readiness. Check the
-external runtime, Cordis composition, provider route, and credential service;
+'doctor' checks configuration and runtime presence only. 'dsh_health'
+distinguishes runtime initialization from provider readiness. Check the DSH
+profile patch, provider route, and credential service;
 quota and missing-credential failures are returned as structured errors.
 
 ### MCP client reports a protocol or tool-list problem
@@ -269,13 +296,21 @@ pnpm run package:smoke
 'package:smoke' packs the repository, installs the tarball into a disposable
 empty directory, and verifies the installed CLI and MCP handshake. It is
 keyless. The real OpenCode Go fresh-install smoke is opt-in and requires
-'DSH_MCP_FRESH_REAL_SMOKE=1' plus an external runtime command, argv array, and
-credential supplied by the caller. CI never receives credentials.
+'DSH_MCP_FRESH_REAL_SMOKE=1' plus a credential supplied by the caller. The
+bundled DSH runtime is used unless an explicit external override is present.
+CI never receives credentials.
+
+The final exact-artifact host gate also passed with Codex CLI '0.153.4': the
+fresh-installed package exposed exactly eight tools, reported verified runtime
+and provider readiness, completed delegate and same-session continue calls
+without delegated tool use, left the disposable workspace empty, and shut
+down with zero relevant orphan processes.
 
 ## Roadmap boundary
 
 Phase 0 through Phase 5 are implemented and this release-candidate work
-packages them as '0.6.0-rc.1'. No Phase 7 work is started by this release
+packages them as '0.6.0-rc.2'. The 0.1.2 SDK migration also completes the
+missing Cursor setup example from Phase 4. No Phase 7 work is started by this release
 candidate. Cancellation, MCP v2 migration, HTTP transport, progress
 streaming, nested orchestration, and automatic remote/GitHub integration are
 outside this scope.
@@ -283,4 +318,3 @@ outside this scope.
 ## License
 
 MIT. See [LICENSE](LICENSE).
-

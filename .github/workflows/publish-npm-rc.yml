@@ -1,0 +1,69 @@
+name: Publish npm release candidate
+
+# This OIDC workflow is used after the npm package namespace has been claimed
+# by its one-time authenticated first publication.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version and Git tag to publish
+        required: true
+        default: 0.6.0-rc.2
+      dist_tag:
+        description: npm dist-tag; latest is intentionally forbidden here
+        required: true
+        default: next
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the requested release tag
+        uses: actions/checkout@v6
+        with:
+          ref: v${{ inputs.version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.19.0
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Use an npm CLI with Trusted Publishing support
+        run: npm install --global npm@11.5.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Validate the release input
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_DIST_TAG: ${{ inputs.dist_tag }}
+        run: |
+          node -e "const p=require('./package.json'); if (p.version !== process.env.RELEASE_VERSION) process.exit(1)"
+          test "$RELEASE_DIST_TAG" = "next"
+          test "$(git describe --tags --exact-match HEAD)" = "v${RELEASE_VERSION}"
+
+      - name: Install and run the release checks
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
+          pnpm test
+          npm pack --dry-run --json --ignore-scripts
+
+      - name: Publish through npm Trusted Publishing
+        env:
+          RELEASE_DIST_TAG: ${{ inputs.dist_tag }}
+        run: npm publish --provenance --access public --tag "$RELEASE_DIST_TAG"

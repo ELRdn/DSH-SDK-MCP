@@ -42,16 +42,18 @@ function runNode(args) {
 test('release CLI reports the pinned version and non-secret doctor state', async () => {
   const version = await runNode([cli, '--version'])
   assert.equal(version.code, 0)
-  assert.equal(version.stdout.trim(), '0.6.0-rc.1')
+  assert.equal(version.stdout.trim(), '0.6.0-rc.2')
   assert.equal(version.stderr, '')
 
   const doctor = await runNode([cli, 'doctor', '--json'])
   assert.equal(doctor.code, 0)
   const report = JSON.parse(doctor.stdout)
-  assert.equal(report.packageVersion, '0.6.0-rc.1')
+  assert.equal(report.packageVersion, '0.6.0-rc.2')
   assert.equal(report.mcp.sdkVersion, '1.30.0')
   assert.equal(report.mcp.protocolRevision, '2025-11-25')
-  assert.equal(report.dsh.externalRuntimeRequired, true)
+  assert.equal(report.dsh.externalRuntimeRequired, false)
+  assert.equal(report.dsh.runtimeMode, 'bundled-sdk')
+  assert.equal(report.dsh.bundledRuntimeAvailable, true)
   assert.equal(report.sandbox, 'inconclusive')
   assert.equal(report.status, 'needs-configuration')
   assert.equal(JSON.stringify(report).includes('sk-'), false)
@@ -73,6 +75,7 @@ test('release package metadata has one executable and the explicit publish allow
     'CHANGELOG.md',
   ])
   assert.equal(packageJson.dependencies['@deepseek-ai/dsh-sdk-jsonrpc-demo'], undefined)
+  assert.equal(packageJson.dependencies['@deepseek-ai/dsh'], '0.1.2-rc.1')
 })
 
 test('package audit remains keyless and passes', {
@@ -82,7 +85,7 @@ test('package audit remains keyless and passes', {
   assert.equal(audit.code, 0, audit.stderr)
   const report = JSON.parse(audit.stdout)
   assert.equal(report.ok, true)
-  assert.equal(report.version, '0.6.0-rc.1')
-  assert.equal(report.runtimePolicy, 'external-runtime-required')
+  assert.equal(report.version, '0.6.0-rc.2')
+  assert.equal(report.runtimePolicy, 'bundled-sdk-profile')
   assert.ok(report.fileCount > 0)
 })

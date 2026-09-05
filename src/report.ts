@@ -67,6 +67,14 @@ export interface Phase0Report {
 
 export const MAX_SAFE_ERROR_MESSAGE_CHARS = 400
 
+export function packageVersionFromRoot(root: string): string {
+  const metadata = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version?: unknown }
+  if (typeof metadata.version !== 'string' || metadata.version.length === 0) {
+    throw new Error('package metadata has no version')
+  }
+  return metadata.version
+}
+
 function versionFromPath(candidate: string): string | null {
   let directory = dirname(candidate)
   for (let attempt = 0; attempt < 12; attempt += 1) {

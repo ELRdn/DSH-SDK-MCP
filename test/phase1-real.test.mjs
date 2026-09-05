@@ -8,6 +8,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { test } from 'node:test'
 
+import { resolveBundledDshBin } from '../dist/sdk-runtime.js'
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const serverEntry = join(projectRoot, 'dist', 'index.js')
 const runtimeProbe = join(projectRoot, 'scripts', 'runtime-probe.mjs')
@@ -50,8 +52,16 @@ test('opt-in real OpenCode Go persistent session smoke', {
   const auditRoot = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase1-real-audit-'))
   const workspace = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase1-real-workspace-'))
   const auditPath = join(auditRoot, 'runtime-audit.json')
-  const configuredCommand = process.env.DSH_MCP_RUNTIME_COMMAND
-  const configuredArgs = JSON.parse(process.env.DSH_MCP_RUNTIME_ARGS ?? '[]')
+  const configuredCommand = process.env.DSH_MCP_RUNTIME_COMMAND ?? process.execPath
+  const configuredArgs = process.env.DSH_MCP_RUNTIME_ARGS === undefined
+    ? [
+        resolveBundledDshBin(),
+        '--profile',
+        'sdk',
+        '--patch',
+        join(projectRoot, 'runtime', 'phase0.opencode-go.cordis.yml'),
+      ]
+    : JSON.parse(process.env.DSH_MCP_RUNTIME_ARGS)
   assert.equal(typeof configuredCommand, 'string')
   assert.ok(Array.isArray(configuredArgs))
 

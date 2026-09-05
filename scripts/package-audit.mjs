@@ -81,8 +81,8 @@ async function main() {
   if (packageJson.bin?.['dsh-sdk-mcp'] !== './dist/cli.js') {
     violations.push('the dsh-sdk-mcp bin must target dist/cli.js')
   }
-  if (packageJson.dependencies?.['@deepseek-ai/dsh-sdk-jsonrpc-demo'] !== undefined) {
-    violations.push('the external DSH runtime must not be a production dependency')
+  if (packageJson.dependencies?.['@deepseek-ai/dsh'] !== '0.1.2-rc.1') {
+    violations.push('the bundled DSH runtime must be pinned to 0.1.2-rc.1')
   }
   if (missing.length > 0) violations.push('missing required files: ' + missing.join(', '))
   if (forbidden.length > 0) violations.push('forbidden package paths: ' + forbidden.join(', '))
@@ -96,7 +96,7 @@ async function main() {
     unpackedSize: report.unpackedSize,
     packageSize: report.size,
     files,
-    runtimePolicy: 'external-runtime-required',
+    runtimePolicy: 'bundled-sdk-profile',
   }) + '\n')
 }
 

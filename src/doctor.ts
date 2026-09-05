@@ -41,11 +41,13 @@ export interface DoctorReport {
     protocolVersion: string | null
     runtimePackage: string
     runtimePackageVersion: string | null
+    runtimeMode: 'bundled-sdk' | 'external-command'
+    bundledRuntimeAvailable: boolean
     runtimeCommandConfigured: boolean
     runtimeCommandAvailable: boolean
     runtimeArgsConfigured: boolean
     runtimeArgsCount: number
-    externalRuntimeRequired: true
+    externalRuntimeRequired: false
   }
   readonly provider: {
     profile: string
@@ -167,9 +169,7 @@ export async function collectDoctor(
   let launch: RuntimeLaunchConfig | undefined
   let launchError: string | undefined
   try {
-    if (environment.DSH_MCP_RUNTIME_COMMAND?.trim()) {
-      launch = loadRuntimeLaunchConfig(environment, projectRoot)
-    }
+    launch = loadRuntimeLaunchConfig(environment, projectRoot)
   } catch (error) {
     launchError = safeError(error, secretValuesFromEnvironment(environment)).message
   }
@@ -177,6 +177,8 @@ export async function collectDoctor(
   const secretValues = secretValuesFromEnvironment(environment, options.credentialRef)
   const runtimeCommand = environment.DSH_MCP_RUNTIME_COMMAND?.trim()
   const runtimeCommandCheck = await commandAvailable(runtimeCommand, ['--version'], secretValues)
+  const runtimePackageVersion = packageVersion(options.runtimePackage)
+  const bundledRuntimeAvailable = runtimePackageVersion !== null
   const gitCheck = await commandAvailable('git', ['--version'], secretValues)
   const cordisAvailable = await fileEntryAvailable(options.cordisConfig)
   const workspaceValue = environment.DSH_MCP_RUNTIME_CWD?.trim()
@@ -197,17 +199,20 @@ export async function collectDoctor(
   const warnings: string[] = []
   if (optionsError !== undefined) warnings.push('provider configuration is invalid')
   if (launchError !== undefined) warnings.push('runtime launch configuration is invalid')
-  if (runtimeCommand === undefined || runtimeCommand === '') warnings.push('set DSH_MCP_RUNTIME_COMMAND and DSH_MCP_RUNTIME_ARGS to an external DSH JSON-RPC runtime')
-  else if (!runtimeCommandCheck.available) warnings.push('the configured runtime command is not available')
-  if (!cordisAvailable) warnings.push('the selected Cordis configuration is not available in this installation')
+  if (runtimeCommand !== undefined && runtimeCommand !== '' && !runtimeCommandCheck.available) warnings.push('the configured external runtime command is not available')
+  if ((runtimeCommand === undefined || runtimeCommand === '') && !bundledRuntimeAvailable) warnings.push('the bundled @deepseek-ai/dsh runtime is not available')
+  if (!cordisAvailable) warnings.push('the selected DSH profile patch is not available in this installation')
   if (!gitCheck.available) warnings.push('git is unavailable; worktree tools cannot operate')
   if (!credentialConfigured(environment, options)) warnings.push(`credential is not configured for ${options.credentialRef}`)
   if (workspaceValue !== undefined && (!workspaceAbsolute || !workspaceAvailable)) warnings.push('DSH_MCP_RUNTIME_CWD must be an existing absolute directory')
 
-  const fatal = optionsError !== undefined || launchError !== undefined || !cordisAvailable || !gitCheck.available
-  const needsConfiguration = runtimeCommand === undefined
-    || runtimeCommand === ''
-    || !runtimeCommandCheck.available
+  const explicitRuntime = runtimeCommand !== undefined && runtimeCommand !== ''
+  const fatal = optionsError !== undefined
+    || launchError !== undefined
+    || !cordisAvailable
+    || !gitCheck.available
+    || (!explicitRuntime && !bundledRuntimeAvailable)
+  const needsConfiguration = (explicitRuntime && !runtimeCommandCheck.available)
     || !credentialConfigured(environment, options)
   const status: DoctorStatus = fatal ? 'error' : needsConfiguration ? 'needs-configuration' : 'ready'
 
@@ -230,12 +235,14 @@ export async function collectDoctor(
       clientVersion: packageVersion('@deepseek-ai/dsh-sdk-client'),
       protocolVersion: packageVersion('@deepseek-ai/dsh-sdk-protocol'),
       runtimePackage: redactSecretLike(options.runtimePackage, secretValues),
-      runtimePackageVersion: packageVersion(options.runtimePackage),
-      runtimeCommandConfigured: runtimeCommand !== undefined && runtimeCommand !== '',
+      runtimePackageVersion,
+      runtimeMode: explicitRuntime ? 'external-command' : 'bundled-sdk',
+      bundledRuntimeAvailable,
+      runtimeCommandConfigured: explicitRuntime,
       runtimeCommandAvailable: runtimeCommandCheck.available,
       runtimeArgsConfigured: runtimeArgs !== undefined && runtimeArgs !== '',
       runtimeArgsCount,
-      externalRuntimeRequired: true,
+      externalRuntimeRequired: false,
     },
     provider: {
       profile: redactSecretLike(options.profile, secretValues),
@@ -272,7 +279,7 @@ export function formatDoctorReport(report: DoctorReport): string {
     `package: ${report.packageVersion}`,
     `node: ${report.node.version} (${report.node.platform}/${report.node.arch})`,
     `mcp: @modelcontextprotocol/sdk ${report.mcp.sdkVersion ?? 'unavailable'} / ${report.mcp.protocolRevision} / ${report.mcp.transport}`,
-    `dsh: client=${report.dsh.clientVersion ?? 'unavailable'} protocol=${report.dsh.protocolVersion ?? 'unavailable'} runtime=${report.dsh.runtimePackageVersion ?? 'external-or-uninstalled'}`,
+    `dsh: client=${report.dsh.clientVersion ?? 'unavailable'} protocol=${report.dsh.protocolVersion ?? 'unavailable'} runtime=${report.dsh.runtimePackageVersion ?? 'unavailable'} mode=${report.dsh.runtimeMode}`,
     `runtime command: configured=${report.dsh.runtimeCommandConfigured} available=${report.dsh.runtimeCommandAvailable} args=${report.dsh.runtimeArgsCount}`,
     `provider: ${report.provider.provider}/${report.provider.model} credentialConfigured=${report.provider.credentialConfigured}`,
     `cordis: configured=${report.cordis.configured} available=${report.cordis.available}`,

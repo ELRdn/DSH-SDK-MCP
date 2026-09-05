@@ -5,7 +5,8 @@
 - Node.js `>=22.19.0` (the release checks use the pinned Node 22 line).
 - pnpm `11.7.0`.
 - Git for worktree and integration tests.
-- An external DSH JSON-RPC runtime only for the opt-in real smoke.
+- A provider credential only for opt-in real smoke tests; the matching DSH
+  `sdk` runtime is installed with the project.
 
 Install keylessly from the repository root:
 

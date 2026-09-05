@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
-import { readFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { loadPhase0Options, secretValuesFromEnvironment } from './config.js'
 import { collectDoctor, formatDoctorReport } from './doctor.js'
 import { runMcpServer } from './mcp-server.js'
-import { safeError } from './report.js'
+import { packageVersionFromRoot, safeError } from './report.js'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 async function packageVersion(): Promise<string> {
   try {
-    const packageJson = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8')) as { version?: unknown }
-    return typeof packageJson.version === 'string' ? packageJson.version : 'unknown'
+    return packageVersionFromRoot(projectRoot)
   } catch {
     return 'unknown'
   }

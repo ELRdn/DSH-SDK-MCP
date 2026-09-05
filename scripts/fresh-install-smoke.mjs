@@ -223,7 +223,7 @@ function startMcp(cli, environment, cwd) {
   return { child, reader, stderr: () => stderr }
 }
 
-async function keylessSmoke(installRoot, installedRoot, environment, secrets) {
+async function keylessSmoke(installRoot, installedRoot, environment, secrets, expectedVersion) {
   const cli = join(installedRoot, 'dist', 'cli.js')
   const doctor = await runProcess(process.execPath, [cli, 'doctor', '--json'], {
     cwd: installRoot,
@@ -233,20 +233,24 @@ async function keylessSmoke(installRoot, installedRoot, environment, secrets) {
   assert.equal(doctor.code, 0)
   assertNoSecrets(doctor.stdout + doctor.stderr, secrets, 'doctor')
   const report = JSON.parse(doctor.stdout)
-  assert.equal(report.packageVersion, '0.6.0-rc.1')
+  assert.equal(report.packageVersion, expectedVersion)
   assert.equal(report.status, 'needs-configuration')
-  assert.equal(report.dsh.externalRuntimeRequired, true)
+  assert.equal(report.dsh.externalRuntimeRequired, false)
+  assert.equal(report.dsh.runtimeMode, 'bundled-sdk')
+  assert.equal(report.dsh.bundledRuntimeAvailable, true)
   assert.equal(report.sandbox, 'inconclusive')
 
   const bin = join(installRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'dsh-sdk-mcp.cmd' : 'dsh-sdk-mcp')
-  const version = await runProcess(bin, ['--version'], {
+  const binInvocation = process.platform === 'win32'
+    ? { command: 'cmd.exe', args: ['/d', '/s', '/c', 'call', bin, '--version'] }
+    : { command: bin, args: ['--version'] }
+  const version = await runProcess(binInvocation.command, binInvocation.args, {
     cwd: installRoot,
     env: environment,
-    shell: process.platform === 'win32',
     timeoutMs: 30_000,
   })
-  assert.equal(version.code, 0)
-  assert.equal(version.stdout.trim(), '0.6.0-rc.1')
+  assert.equal(version.code, 0, version.stderr)
+  assert.equal(version.stdout.trim(), expectedVersion)
   assertNoSecrets(version.stdout + version.stderr, secrets, 'version')
 
   const server = startMcp(cli, environment, installRoot)
@@ -254,14 +258,16 @@ async function keylessSmoke(installRoot, installedRoot, environment, secrets) {
     const initialize = await request(server, 1, 'initialize', {
       protocolVersion: '2025-11-25',
       capabilities: {},
-      clientInfo: { name: 'dsh-sdk-mcp-fresh-install-smoke', version: '0.6.0-rc.1' },
+      clientInfo: { name: 'dsh-sdk-mcp-fresh-install-smoke', version: expectedVersion },
     })
     assert.equal(initialize.protocolVersion, '2025-11-25')
+    assert.equal(initialize.serverInfo?.version, expectedVersion)
     server.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
     const listed = await request(server, 2, 'tools/list', {})
     assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), expectedTools)
     const health = await request(server, 3, 'tools/call', { name: 'dsh_health', arguments: {} })
     assert.equal(typeof health.structuredContent?.runtimeConfigured, 'boolean')
+    assert.equal(health.structuredContent?.bridgeVersion, expectedVersion)
     assertNoSecrets(JSON.stringify(health), secrets, 'health')
     server.child.stdin.end()
     const exitCode = await waitForClose(server.child)
@@ -276,17 +282,14 @@ async function keylessSmoke(installRoot, installedRoot, environment, secrets) {
   }
 }
 
-async function optionalRealSmoke(installRoot, installedRoot, environment, secrets) {
+async function optionalRealSmoke(installRoot, installedRoot, environment, secrets, expectedVersion) {
   const runtimeCommand = environment.DSH_MCP_RUNTIME_COMMAND?.trim()
   const runtimeArgs = environment.DSH_MCP_RUNTIME_ARGS?.trim()
-  if (!runtimeCommand || !runtimeArgs) {
-    throw new Error('DSH_MCP_FRESH_REAL_SMOKE=1 requires runtime command and args')
-  }
   const projectKey = projectRoot.toLowerCase().replaceAll('\\', '/')
   const cordis = environment.DSH_MCP_CORDIS_CONFIG?.trim()
     || join(installedRoot, 'runtime', 'phase0.opencode-go.cordis.yml')
-  if (runtimeCommand.toLowerCase().includes(projectKey)
-    || runtimeArgs.toLowerCase().includes(projectKey)
+  if ((runtimeCommand?.toLowerCase().includes(projectKey) ?? false)
+    || (runtimeArgs?.toLowerCase().includes(projectKey) ?? false)
     || cordis.toLowerCase().includes(projectKey)) {
     throw new Error('fresh real smoke must not use the source checkout')
   }
@@ -300,16 +303,18 @@ async function optionalRealSmoke(installRoot, installedRoot, environment, secret
   }
   const server = startMcp(join(installedRoot, 'dist', 'cli.js'), realEnv, installRoot)
   try {
-    await request(server, 1, 'initialize', {
+    const initialize = await request(server, 1, 'initialize', {
       protocolVersion: '2025-11-25',
       capabilities: {},
-      clientInfo: { name: 'dsh-sdk-mcp-fresh-real-smoke', version: '0.6.0-rc.1' },
+      clientInfo: { name: 'dsh-sdk-mcp-fresh-real-smoke', version: expectedVersion },
     })
+    assert.equal(initialize.serverInfo?.version, expectedVersion)
     server.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
     const listed = await request(server, 2, 'tools/list', {})
     assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), expectedTools)
     const health = await request(server, 3, 'tools/call', { name: 'dsh_health', arguments: {} })
     assert.equal(health.structuredContent?.providerReady, true)
+    assert.equal(health.structuredContent?.bridgeVersion, expectedVersion)
     const delegate = await request(server, 4, 'tools/call', {
       name: 'dsh_delegate',
       arguments: { task: 'Reply with one short non-empty sentence proving the fresh package path.', cwd: installRoot },
@@ -357,19 +362,19 @@ async function main() {
     )
     const installedRoot = join(installDir, 'node_modules', packageName)
     const installedPackage = JSON.parse(await readFile(join(installedRoot, 'package.json'), 'utf8'))
-    assert.equal(installedPackage.version, '0.6.0-rc.1')
-    const keyless = await keylessSmoke(installDir, installedRoot, safeEnv, secrets)
+    assert.equal(installedPackage.version, '0.6.0-rc.2')
+    const keyless = await keylessSmoke(installDir, installedRoot, safeEnv, secrets, installedPackage.version)
     const result = {
       ok: true,
       package: packageName,
       version: installedPackage.version,
       freshInstall: true,
-      runtimePolicy: 'external-runtime-required',
+      runtimePolicy: 'bundled-sdk-profile',
       keyless,
       real: process.env.DSH_MCP_FRESH_REAL_SMOKE === '1' ? 'running' : { status: 'opt-in-skipped' },
     }
     if (process.env.DSH_MCP_FRESH_REAL_SMOKE === '1') {
-      result.real = await optionalRealSmoke(installDir, installedRoot, process.env, secrets)
+      result.real = await optionalRealSmoke(installDir, installedRoot, process.env, secrets, installedPackage.version)
     }
     process.stdout.write(JSON.stringify(result, null, 2) + '\n')
   } finally {

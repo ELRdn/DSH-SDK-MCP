@@ -6,11 +6,11 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
 import {
-  DeepSeekHarness,
   RequestTimeoutError,
 } from '@deepseek-ai/dsh-sdk-client'
 
 import { summarizeRunResult } from '../dist/diagnostics.js'
+import { createDeepSeekHarness } from '../dist/sdk-runtime.js'
 
 const fakeRuntime = fileURLToPath(new URL('./fake-runtime.mjs', import.meta.url))
 
@@ -20,17 +20,18 @@ async function missing(path) {
 
 async function makeHarness(mode, root, options = {}) {
   const pidFile = join(root, `${mode}.pid`)
-  const harness = new DeepSeekHarness({
-    launch: {
-      command: process.execPath,
-      args: [fakeRuntime, mode],
-      cwd: root,
-      env: { ...process.env, DSH_PHASE0_FAKE_PID_FILE: pidFile },
-      requestTimeoutMs: options.requestTimeoutMs ?? 500,
-      shutdownTimeoutMs: 100,
-      disposeEofGraceMs: 500,
-      disposeGraceMs: 500,
-    },
+  const harness = createDeepSeekHarness({
+    command: process.execPath,
+    args: [fakeRuntime, mode],
+    profile: 'sdk',
+    patches: [],
+    cwd: root,
+    env: { ...process.env, DSH_PHASE0_FAKE_PID_FILE: pidFile },
+    requestTimeoutMs: options.requestTimeoutMs ?? 500,
+    shutdownTimeoutMs: 100,
+    disposeEofGraceMs: 500,
+    disposeGraceMs: 500,
+  }, {
     cwd: root,
     provider: 'deepseek-official',
     model: 'deepseek-v4-flash',
@@ -132,14 +133,15 @@ test('SDK contract: request timeout is surfaced and close terminates the runtime
 
 test('SDK contract: nonexistent runtime command fails without a shell fallback', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-contract-'))
-  const harness = new DeepSeekHarness({
-    launch: {
-      command: join(root, 'does-not-exist.exe'),
-      args: [],
-      cwd: root,
-      requestTimeoutMs: 100,
-      disposeGraceMs: 100,
-    },
+  const harness = createDeepSeekHarness({
+    command: join(root, 'does-not-exist.exe'),
+    args: [],
+    profile: 'sdk',
+    patches: [],
+    cwd: root,
+    requestTimeoutMs: 100,
+    disposeGraceMs: 100,
+  }, {
     cwd: root,
   })
   try {

@@ -159,7 +159,10 @@ test('dsh_parallel enforces DSH_MCP_MAX_PARALLEL without changing result order',
     DSH_MCP_MAX_PARALLEL: '2',
     DSH_MCP_RUNTIME_ARGS: JSON.stringify([fakeRuntime, 'parallel-slow']),
     DSH_PHASE3_FAKE_AUDIT_DIR: auditDir,
-    DSH_MCP_RUNTIME_ENV_JSON: JSON.stringify({ DSH_PHASE3_FAKE_AUDIT_DIR: auditDir }),
+    DSH_MCP_RUNTIME_ENV_JSON: JSON.stringify({
+      DSH_PHASE3_FAKE_AUDIT_DIR: auditDir,
+      DSH_PHASE3_FAKE_DELAY_MS: '1000',
+    }),
   })
   try {
     const result = await client.callTool({
@@ -250,7 +253,10 @@ test('one parallel worker can fail or time out without canceling siblings', asyn
   ])
   const pidDir = await mkdtemp(join(root, 'pids-'))
   const { client, transport } = await connectClient({
-    DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS: '100',
+    // The DSH 0.1.2 compatibility launcher adds one Node process boundary;
+    // keep the successful workers clear of startup jitter while the fake
+    // timeout worker still never responds.
+    DSH_MCP_RUNTIME_REQUEST_TIMEOUT_MS: '500',
     DSH_MCP_RUNTIME_ARGS: JSON.stringify([fakeRuntime, 'parallel-mixed']),
     DSH_MCP_RUNTIME_ENV_JSON: JSON.stringify({ DSH_PHASE3_FAKE_PID_DIR: pidDir }),
   })

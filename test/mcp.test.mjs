@@ -119,6 +119,11 @@ function sendJsonLine(stdin, message) {
 test('MCP tools/list exposes exactly the Phase 3 tools and dsh_health is structured', async () => {
   const { client, transport } = await connectClient()
   try {
+    const packageJson = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8'))
+    assert.deepEqual(client.getServerVersion(), {
+      name: 'dsh-sdk-mcp-server',
+      version: packageJson.version,
+    })
     const listed = await client.listTools()
     assert.deepEqual(
       listed.tools.map((tool) => tool.name).sort(),
@@ -128,6 +133,7 @@ test('MCP tools/list exposes exactly the Phase 3 tools and dsh_health is structu
     const health = await client.callTool({ name: 'dsh_health' })
     assert.equal(health.isError, undefined)
     assert.equal(health.structuredContent.runtimeConfigured, true)
+    assert.equal(health.structuredContent.bridgeVersion, packageJson.version)
     assert.equal(health.structuredContent.provider, 'deepseek-official')
     assert.equal(health.structuredContent.model, 'deepseek-v4-flash')
     assert.equal(JSON.stringify(health).includes('sk-phase1-test-secret'), false)

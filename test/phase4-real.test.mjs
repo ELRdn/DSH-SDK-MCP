@@ -10,9 +10,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { test } from 'node:test'
 
+import { resolveBundledDshBin } from '../dist/sdk-runtime.js'
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const serverEntry = join(projectRoot, 'dist', 'index.js')
-const runtimeEntry = join(projectRoot, 'node_modules', '@deepseek-ai', 'dsh-sdk-jsonrpc-demo', 'lib', 'bin.js')
 const runtimeProbe = join(projectRoot, 'scripts', 'parallel-runtime-probe.mjs')
 const execFile = promisify(execFileCallback)
 
@@ -113,7 +114,13 @@ test('opt-in real OpenCode Go Phase 4 worktree smoke', {
   const auditDirectory = await mkdtemp(join(tmpdir(), 'dsh-sdk-mcp-phase4-real-audits-'))
   const configuredCommand = process.env.DSH_MCP_RUNTIME_COMMAND?.trim() || process.execPath
   const configuredArgs = process.env.DSH_MCP_RUNTIME_ARGS === undefined
-    ? [runtimeEntry]
+    ? [
+        resolveBundledDshBin(),
+        '--profile',
+        'sdk',
+        '--patch',
+        join(projectRoot, 'runtime', 'phase0.opencode-go.cordis.yml'),
+      ]
     : JSON.parse(process.env.DSH_MCP_RUNTIME_ARGS)
   const serverEnvironment = {
     ...process.env,

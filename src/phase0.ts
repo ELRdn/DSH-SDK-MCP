@@ -17,6 +17,10 @@ import {
 } from './config.js'
 import { RuntimeRunGate } from './run-gate.js'
 import {
+  createDeepSeekHarness,
+  materializeRuntimeLaunch,
+} from './sdk-runtime.js'
+import {
   classifySandboxCapability,
   summarizeRunResult,
   summarizeToolEvents,
@@ -66,17 +70,25 @@ function createProbeLaunch(
   launch: RuntimeLaunchConfig,
   auditPath: string,
 ): RuntimeLaunchConfig {
+  const target = materializeRuntimeLaunch(launch)
   return {
     command: process.execPath,
     args: [
       runtimeProbePath,
-      launch.command,
-      JSON.stringify(launch.args),
+      target.command,
+      JSON.stringify(target.args),
       auditPath,
-      launch.cwd ?? process.cwd(),
+      target.cwd ?? process.cwd(),
     ],
-    cwd: launch.cwd,
-    env: launch.env,
+    profile: 'sdk',
+    patches: [],
+    cwd: target.cwd,
+    env: target.env,
+    requestTimeoutMs: launch.requestTimeoutMs,
+    initializeTimeoutMs: launch.initializeTimeoutMs,
+    shutdownTimeoutMs: launch.shutdownTimeoutMs,
+    disposeEofGraceMs: launch.disposeEofGraceMs,
+    disposeGraceMs: launch.disposeGraceMs,
   }
 }
 
@@ -425,15 +437,16 @@ async function runSandboxSmoke(
     DSH_SESSION_ROOT: fixture.sessions,
   }
   const sandboxLaunch = createProbeLaunch(
-    { ...launch, env: sandboxEnvironment },
+    { ...launch, patches: [options.sandboxCordisConfig], env: sandboxEnvironment },
     auditPath,
   )
-  const harness = new DeepSeekHarness({
-    launch: sandboxLaunch,
+  const harness = createDeepSeekHarness(sandboxLaunch, {
     cwd: fixture.root,
     provider: options.provider,
     model: options.model,
     maxTokens: options.maxTokens,
+    dshHome: join(fixture.root, 'dsh-home-sandbox'),
+    env: sandboxEnvironment,
   })
   const gate = new RuntimeRunGate()
   let smoke: StageResult
@@ -573,10 +586,9 @@ export async function runPhase0(
   const probeLaunch = createProbeLaunch(effectiveLaunch, fixture.auditPath)
   const runtimePackageReportKey = redactSecretLike(options.runtimePackage, secretValues)
   const dependencies = {
+    '@deepseek-ai/dsh': packageVersion('@deepseek-ai/dsh'),
     '@deepseek-ai/dsh-sdk-client': packageVersion('@deepseek-ai/dsh-sdk-client'),
     '@deepseek-ai/dsh-sdk-protocol': packageVersion('@deepseek-ai/dsh-sdk-protocol'),
-    '@deepseek-ai/dsh-llm-pi-ai': packageVersion('@deepseek-ai/dsh-llm-pi-ai'),
-    '@earendil-works/pi-ai': packageVersion('@earendil-works/pi-ai'),
     [runtimePackageReportKey]: packageVersion(options.runtimePackage),
   }
   const failures: string[] = []
@@ -592,12 +604,13 @@ export async function runPhase0(
 
   let harness: DeepSeekHarness | undefined
   try {
-    harness = new DeepSeekHarness({
-      launch: probeLaunch,
+    harness = createDeepSeekHarness(probeLaunch, {
       cwd: fixture.root,
       provider: options.provider,
       model: options.model,
       maxTokens: options.maxTokens,
+      dshHome: join(fixture.root, 'dsh-home'),
+      env: effectiveLaunch.env,
     })
     const gate = new RuntimeRunGate()
 
@@ -661,6 +674,7 @@ export async function runPhase0(
   }
 
   const finishedAt = new Date().toISOString()
+  const materializedLaunch = materializeRuntimeLaunch(effectiveLaunch)
   return {
     schemaVersion: 3,
     status: coreStatus,
@@ -682,9 +696,9 @@ export async function runPhase0(
     },
     dependencies,
     launch: makeLaunchReport(
-      effectiveLaunch.command,
-      effectiveLaunch.args,
-      effectiveLaunch.cwd,
+      materializedLaunch.command,
+      materializedLaunch.args,
+      materializedLaunch.cwd,
       effectiveLaunch.env ?? environment,
     ),
     stages,

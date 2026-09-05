@@ -2,11 +2,10 @@
 setlocal
 cd /d "%~dp0.."
 
-rem Keep the runtime external to the SDK and pass an argv array to node.
-if not defined DSH_MCP_RUNTIME_COMMAND set DSH_MCP_RUNTIME_COMMAND=node
-if not defined DSH_MCP_RUNTIME_ARGS set DSH_MCP_RUNTIME_ARGS=["%CD:\=/%/node_modules/@deepseek-ai/dsh-sdk-jsonrpc-demo/lib/bin.js"]
+rem DSH 0.1.2+ is launched from the SDK client's same-version dependency.
+rem DSH_MCP_RUNTIME_COMMAND/ARGS remain optional external-runtime overrides.
 
-rem Profile and provider can be selected independently; explicit Cordis config still wins.
+rem Provider selection chooses the matching profile patch; an explicit patch still wins.
 if not defined DSH_MCP_PROFILE (
   if not defined DSH_MCP_PROVIDER set DSH_MCP_PROVIDER=deepseek-official
   if /I "%DSH_MCP_PROVIDER%"=="opencode-go" set DSH_MCP_PROFILE=opencode-go
