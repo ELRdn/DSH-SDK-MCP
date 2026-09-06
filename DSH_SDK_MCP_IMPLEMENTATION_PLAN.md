@@ -4,11 +4,11 @@
 >
 > Goal: expose a full DeepSeek Harness (DSH) runtime as a reusable MCP subagent for Codex, Claude Code, Cursor, and other MCP clients by driving DSH through its official SDK/JSON-RPC surface rather than through the Web UI or a one-shot headless CLI.
 >
-> Status: Phase 0-5 implemented; Phase 6 release candidate approved for 'next'
+> Status: Phase 0-5 implemented; Phase 6 '0.6.0-rc.2' published on GitHub and npm
 >
-> Last reviewed: 2026-09-05
+> Last reviewed: 2026-09-06
 
-## Current roadmap checkpoint — 2026-09-05
+## Current roadmap checkpoint — 2026-09-06
 
 | Roadmap area | Current state | Release implication |
 | --- | --- | --- |
@@ -18,7 +18,7 @@
 | Phase 3 — hardening | Implemented with sandbox capability still 'inconclusive' | Do not market worktrees as an OS security boundary |
 | Phase 4 — client integrations | Codex exact-artifact host path verified; Claude Code, Cursor, and generic setup examples documented | Claude Code remains unverified for rc.2 |
 | Phase 5 — release quality | Package, CI, audit, smoke, distribution docs, and Codex host evidence exist | Demo media remains post-RC launch work |
-| Phase 6 — RC packaging | '0.6.0-rc.2' approved | Publish under npm 'next', never 'latest' |
+| Phase 6 — RC packaging | '0.6.0-rc.2' published on GitHub and npm | `next` points to the RC; npm also maps `latest` to the only published version until stable |
 
 Immediate post-RC priorities, based on current competitors, are progress/job
 visibility, an async cancellation design that matches upstream DSH semantics,
@@ -55,13 +55,14 @@ integration metadata.
       exactly 8 tools, verified health, delegate, same-session continue,
       zero delegated tool calls, empty host workspace, and zero orphans.
 - [ ] Claude Code completes its own rc.2 path before being labeled VERIFIED.
-- [x] npm name is currently unclaimed; `0.6.0-rc.2` release notes and the
-      `next`-only Trusted Publishing workflow are prepared locally.
-- [ ] Git tag/release and npm Trusted Publisher configuration are verified at
-      publication time.
+- [x] `dsh-sdk-mcp@0.6.0-rc.2` is published; npm's `next` tag points to it and
+      the registry integrity matches the verified release artifact.
+- [x] Git tag/release and the GitHub Actions Trusted Publisher configuration
+      are verified.
 
-The technical decision is **GO for '0.6.0-rc.2' on npm 'next'**. The remaining
-unchecked items are publication-time operations, not runtime release blockers.
+The technical decision is **PUBLISHED: '0.6.0-rc.2' on npm 'next'**. Claude
+Code rc.2 verification remains post-publication compatibility work rather than
+a runtime release blocker.
 
 ---
 
@@ -1152,15 +1153,15 @@ The core package must remain client-agnostic.
 
 ## Phase 5 — Release quality
 
-- [ ] README
-- [ ] LICENSE
-- [ ] SECURITY.md
-- [ ] COMPATIBILITY.md
-- [ ] CONTRIBUTING.md
-- [ ] CHANGELOG.md
-- [ ] npm packaging
-- [ ] CI matrix
-- [ ] smoke-test docs
+- [x] README
+- [x] LICENSE
+- [x] SECURITY.md
+- [x] COMPATIBILITY.md
+- [x] CONTRIBUTING.md
+- [x] CHANGELOG.md
+- [x] npm packaging
+- [x] CI matrix
+- [x] smoke-test docs
 - [ ] demo GIF/video
 - [ ] architecture diagram
 
@@ -1435,23 +1436,23 @@ Streamable HTTP optional transport
 
 Before public release:
 
-- [ ] repository name checked;
-- [ ] npm name checked;
-- [ ] no `.env`;
-- [ ] no API key in git history;
-- [ ] exact DSH compatibility documented;
-- [ ] tested on Windows;
+- [x] repository name checked;
+- [x] npm name checked;
+- [x] no `.env`;
+- [x] no API key in git history;
+- [x] exact DSH compatibility documented;
+- [x] tested on Windows;
 - [ ] tested on one Linux environment if possible;
-- [ ] `npm pack --dry-run` inspected;
-- [ ] fresh-machine install tested;
-- [ ] Codex integration tested;
+- [x] `npm pack --dry-run` inspected;
+- [x] fresh-machine install tested;
+- [x] Codex integration tested;
 - [ ] Claude Code integration tested;
 - [ ] screenshot/GIF recorded;
 - [ ] concise architecture diagram in README;
-- [ ] MIT/Apache license decision made;
-- [ ] upstream DeepSeek Harness credited;
-- [ ] no "official" branding;
-- [ ] no unsupported "world first" claim.
+- [x] MIT/Apache license decision made;
+- [x] upstream DeepSeek Harness credited;
+- [x] no "official" branding;
+- [x] no unsupported "world first" claim.
 
 Good launch sentence:
 

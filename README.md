@@ -9,8 +9,10 @@ reimplement the DSH agent loop. The package is intended for local MCP hosts
 such as Codex and Claude Code.
 
 > Release candidate: '0.6.0-rc.2'. The exact-artifact Codex host gate is
-> verified. Publish and install this prerelease through npm's 'next' dist-tag,
-> never 'latest'.
+> verified and the package is published on npm. Install this prerelease as
+> `dsh-sdk-mcp@next` or pin `dsh-sdk-mcp@0.6.0-rc.2`. Because this is the first
+> and currently only npm version, npm also maps `latest` to it until a stable
+> release replaces that tag.
 
 ## What it is
 

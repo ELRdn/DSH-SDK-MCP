@@ -20,6 +20,9 @@
   exactly eight tools, verified health, delegate plus same-session continue,
   zero delegated tool calls, an unchanged workspace, and zero orphan
   processes.
+- Publish the verified 86,009-byte artifact as `dsh-sdk-mcp@0.6.0-rc.2`, point
+  npm's `next` tag to it, and configure GitHub Actions Trusted Publishing for
+  subsequent releases.
 - Keep the MCP v1 stdio transport and exactly eight public tools; cancellation,
   progress jobs, HTTP, and MCP v2 remain deferred.
 

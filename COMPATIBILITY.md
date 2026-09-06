@@ -146,8 +146,10 @@ workers, automatic merge/conflict resolution, push/PR actions, or MCP v2.
 
 The full keyless suite, package audit, fresh isolated install, real
 provider-backed delegate/continue path, and Codex exact-artifact host gate are
-green. '0.6.0-rc.2' is approved for npm publication under 'next', never
-'latest'. This approval does not imply verified Claude Code support.
+green. '0.6.0-rc.2' is published on npm and the `next` tag points to it. npm's
+initial-package constraint also maps `latest` to the only published version;
+consumers should use `@next` or the exact version until a stable release moves
+`latest`. Publication does not imply verified Claude Code support.
 
 ## Security boundary
 
